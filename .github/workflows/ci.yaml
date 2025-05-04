@@ -16,19 +16,19 @@ jobs:
       matrix:
         platform:
           - os_name: Linux-aarch64
-            os: ubuntu-20.04
+            os: ubuntu-latest
             target: aarch64-unknown-linux-musl
             bin: flash-linux-arm64
 
           - os_name: Linux-x86_64
-            os: ubuntu-20.04
+            os: ubuntu-latest
             target: x86_64-unknown-linux-gnu
             bin: flash-linux-amd64
 
           - os_name: Windows-x86_64
             os: windows-latest
             target: x86_64-pc-windows-msvc
-            bin: flash-amd64.exe
+            bin: flash-windows-amd64.exe
 
           - os_name: macOS-x86_64
             os: macOS-latest
@@ -43,6 +43,12 @@ jobs:
           - stable
     steps:
       - uses: actions/checkout@v4
+
+      # Install dependencies for Linux platforms
+      - name: Install dependencies (Linux)
+        if: startsWith(matrix.platform.os_name, 'Linux')
+        run: sudo apt-get update && sudo apt-get install -y libudev-dev
+
       - name: Build binary
         uses: houseabsolute/actions-rust-cross@v1
         with:
@@ -51,17 +57,29 @@ jobs:
           toolchain: ${{ matrix.toolchain }}
           args: "--locked --release"
           strip: true
+
       - name: Rename binary (linux and macos)
         run: mv target/${{ matrix.platform.target }}/release/flash target/${{ matrix.platform.target }}/release/${{ matrix.platform.bin }}
         if: matrix.platform.os_name != 'Windows-x86_64'
       - name: Rename binary (windows)
         run: mv target/${{ matrix.platform.target }}/release/flash.exe target/${{ matrix.platform.target }}/release/${{ matrix.platform.bin }}
         if: matrix.platform.os_name == 'Windows-x86_64'
+
+      - name: Create release zip archive (Linux and macOS)
+        run: |
+          zip -j target/${{ matrix.platform.target }}/release/${{ matrix.platform.bin }}.zip target/${{ matrix.platform.target }}/release/${{ matrix.platform.bin }}
+        shell: bash
+        if: matrix.platform.os_name != 'Windows-x86_64'
+      - name: Create release zip archive (Windows)
+        run: |
+          powershell Compress-Archive -Path target\${{ matrix.platform.target }}\release\${{ matrix.platform.bin }} -DestinationPath target\${{ matrix.platform.target }}\release\${{ matrix.platform.bin }}.zip
+        if: matrix.platform.os_name == 'Windows-x86_64'
+
       - name: Generate SHA-256
-        run: shasum -a 256 target/${{ matrix.platform.target }}/release/${{ matrix.platform.bin }} | cut -d ' ' -f 1 > target/${{ matrix.platform.target }}/release/${{ matrix.platform.bin }}.sha256
-      - name: Release binary and SHA-256 checksum to GitHub
+        run: shasum -a 256 target/${{ matrix.platform.target }}/release/${{ matrix.platform.bin }}.zip | cut -d ' ' -f 1 > target/${{ matrix.platform.target }}/release/${{ matrix.platform.bin }}.zip.sha256
+      - name: Release zip archive and SHA-256 checksum to GitHub
         uses: softprops/action-gh-release@v2
         with:
           files: |
-            target/${{ matrix.platform.target }}/release/${{ matrix.platform.bin }}
-            target/${{ matrix.platform.target }}/release/${{ matrix.platform.bin }}.sha256
+            target/${{ matrix.platform.target }}/release/${{ matrix.platform.bin }}.zip
+            target/${{ matrix.platform.target }}/release/${{ matrix.platform.bin }}.zip.sha256
