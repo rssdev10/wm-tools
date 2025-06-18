@@ -9,11 +9,13 @@ use colored::*;
 use crc::{Crc, CRC_16_XMODEM};
 
 use indicatif::{ProgressBar, ProgressStyle};
-use serialport::SerialPort;
+use serialport::{SerialPort, SerialPortType};
+use tabled::settings::Style;
+use tabled::{Table, Tabled};
 
 use std::{
     fs::File,
-    io::{Read, Write},
+    io::{self, Read, Write},
     time::{Duration, Instant},
 };
 
@@ -48,7 +50,12 @@ const ERASE_CMD: &[u8] = b"\x21\x0a\x00\xc3\x35\x32\x00\x00\x00\x02\x00\xfe\x01"
 const REBOOT_CMD: &[u8] = b"\x21\x06\x00\xc7\x7c\x3f\x00\x00\x00";
 
 #[derive(Parser, Debug)]
-#[clap(about = "Flash tool for Winner Micro MCU", version, author)]
+#[clap(
+    about = "Flash tool for Winner Micro MCU",
+    version,
+    long_about = None,
+    after_help = "Repository: https://github.com/rssdev10/wm-tools"
+)]
 struct Args {
     #[clap(short = 'p', long = "port", help = "serial port")]
     port: Option<String>,
@@ -309,21 +316,91 @@ impl FlashDownloader {
     }
 }
 
-fn list_serial_ports() -> Result<()> {
-    serialport::available_ports()?
-        .into_iter()
-        .filter(|port| {
-            #[cfg(not(windows))]
-            {
-                port.port_name.contains("/tty.")
+fn list_serial_ports() -> io::Result<()> {
+    println!("Available serial ports:");
+    match serialport::available_ports() {
+        Ok(ports) => {
+            // Apply platform-specific filtering
+            let filtered_ports = ports
+                .into_iter()
+                .filter(|port| {
+                    #[cfg(not(windows))]
+                    {
+                        port.port_name.contains("/tty.")
+                            || port.port_name.contains("/ttyUSB")
+                            || port.port_name.contains("/ttyACM")
+                    }
+                    #[cfg(windows)]
+                    {
+                        true
+                    }
+                })
+                .collect::<Vec<_>>();
+
+            if filtered_ports.is_empty() {
+                println!("  No ports found");
+                return Ok(());
             }
-            #[cfg(windows)]
-            {
-                true
+
+            #[derive(Tabled)]
+            struct Row {
+                #[tabled(rename = "Port")]
+                port: String,
+                #[tabled(rename = "Type")]
+                type_str: String,
+                #[tabled(rename = "Info")]
+                info: String,
             }
-        })
-        .for_each(|port| println!("{}", port.port_name));
-    Ok(())
+
+            let mut rows = Vec::new();
+            for port in &filtered_ports {
+                match &port.port_type {
+                    SerialPortType::UsbPort(info) => {
+                        let product = info
+                            .product
+                            .clone()
+                            .unwrap_or_else(|| "Unknown".to_string());
+                        rows.push(Row {
+                            port: port.port_name.clone(),
+                            type_str: "USB".to_string(),
+                            info: format!("{} ({:04x}:{:04x})", product, info.vid, info.pid),
+                        });
+                    }
+                    SerialPortType::BluetoothPort => {
+                        rows.push(Row {
+                            port: port.port_name.clone(),
+                            type_str: "Bluetooth".to_string(),
+                            info: "".to_string(),
+                        });
+                    }
+                    SerialPortType::PciPort => {
+                        rows.push(Row {
+                            port: port.port_name.clone(),
+                            type_str: "PCI".to_string(),
+                            info: "".to_string(),
+                        });
+                    }
+                    SerialPortType::Unknown => {
+                        rows.push(Row {
+                            port: port.port_name.clone(),
+                            type_str: "Unknown".to_string(),
+                            info: "".to_string(),
+                        });
+                    }
+                }
+            }
+
+            let mut table = Table::new(rows);
+            table.with(Style::psql());
+
+            println!("{}", table);
+            Ok(())
+        }
+        Err(e) => Err(io::Error::new(
+            io::ErrorKind::Other,
+            format!("Error listing ports: {}", e),
+        )),
+    }
 }
 
 fn main() -> Result<()> {
