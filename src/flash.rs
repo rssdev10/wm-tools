@@ -51,6 +51,7 @@ const REBOOT_CMD: &[u8] = b"\x21\x06\x00\xc7\x7c\x3f\x00\x00\x00";
 
 #[derive(Parser, Debug)]
 #[clap(
+    name = "flash",
     about = "Flash tool for Winner Micro MCU",
     version,
     long_about = None,
