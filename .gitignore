@@ -33,3 +33,6 @@
 *.old
 *.orig
 *.rej
+
+./firmware
+*.fls

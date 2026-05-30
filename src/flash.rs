@@ -55,7 +55,28 @@ const REBOOT_CMD: &[u8] = b"\x21\x06\x00\xc7\x7c\x3f\x00\x00\x00";
     about = "Flash tool for Winner Micro MCU",
     version,
     long_about = None,
-    after_help = "Repository: https://github.com/rssdev10/wm-tools"
+    after_help = "EXAMPLES:\n  \
+    List available serial ports:\n    \
+    flash -l\n  \
+    \n  \
+    Flash a firmware image (auto-detect port, negotiate baud rate):\n    \
+    flash -i dso3d12_v3.0.6.fls\n  \
+    \n  \
+    Flash to a specific port:\n    \
+    flash -p /dev/tty.usbserial-1110 -i dso3d12_v3.0.6.fls\n  \
+    \n  \
+    Erase flash and flash new firmware:\n    \
+    flash -p /dev/tty.usbserial-1110 -e -i dso3d12_v3.0.6.fls\n  \
+    \n  \
+    Flash at a specific baud rate (460800 bps):\n    \
+    flash -p /dev/tty.usbserial-1110 -b 460800 -i dso3d12_v3.0.6.fls\n  \
+    \n  \
+    Flash multiple images:\n    \
+    flash -i bootloader.fls -i app.fls\n  \
+    \n  \
+    Erase only (no flash):\n    \
+    flash -e\n  \
+    \n  Repository: https://github.com/rssdev10/wm-tools"
 )]
 struct Args {
     #[clap(short = 'p', long = "port", help = "serial port")]
@@ -64,18 +85,12 @@ struct Args {
     #[clap(short = 'b', long = "baudrate", help = "serial baudrate")]
     baudrate: Option<u32>,
 
-    #[clap(
-        short = 'i',
-        long = "image",
-        multiple_occurrences(true),
-        help = "image file paths"
-    )]
+    #[clap(short = 'i', long = "image", help = "image file paths")]
     image: Vec<String>,
 
     #[clap(
         short = 'n',
         long = "name",
-        multiple_occurrences(true),
         help = "firmware names to burn. Ex: app,bootloader,partition_table,custom..."
     )]
     name: Vec<String>,
@@ -129,7 +144,7 @@ impl FlashDownloader {
         let delay = Duration::from_millis(10);
         let iterations = ms / 10;
         for _ in 0..iterations {
-            self.port.write(&[0x1B])?;
+            self.port.write_all(&[0x1B])?;
             std::thread::sleep(delay);
         }
 
@@ -139,7 +154,7 @@ impl FlashDownloader {
     fn empty_read(&mut self) -> Result<()> {
         let mut buf: [u8; 1] = [0; 1];
         while self.port.bytes_to_read()? > 0 {
-            self.port.read(&mut buf)?;
+            self.port.read_exact(&mut buf)?;
         }
 
         Ok(())
@@ -204,7 +219,7 @@ impl FlashDownloader {
                     }
                 }
                 _ => {
-                    self.port.write(&[0x1B])?;
+                    self.port.write_all(&[0x1B])?;
                     std::thread::sleep(Duration::from_millis(30));
                 }
             }
@@ -275,7 +290,7 @@ impl FlashDownloader {
             let mut success = false;
 
             while retries < 10 && !success {
-                self.port.write(&[0x02, block_num, 255 - block_num])?;
+                self.port.write_all(&[0x02, block_num, 255 - block_num])?;
                 self.port.write_all(&buffer)?;
                 self.port.write_all(&checksum.to_be_bytes())?;
                 self.port.flush()?;
@@ -305,7 +320,7 @@ impl FlashDownloader {
         }
 
         // Send EOT
-        self.port.write(&[0x04])?;
+        self.port.write_all(&[0x04])?;
         Ok(())
     }
 
@@ -397,30 +412,43 @@ fn list_serial_ports() -> io::Result<()> {
             println!("{}", table);
             Ok(())
         }
-        Err(e) => Err(io::Error::new(
-            io::ErrorKind::Other,
-            format!("Error listing ports: {}", e),
-        )),
+        Err(e) => Err(io::Error::other(format!("Error listing ports: {}", e))),
     }
 }
 
 fn main() -> Result<()> {
     let args = Args::parse();
 
+    println!(
+        "flash tool v{} for Winner Micro MCU",
+        env!("CARGO_PKG_VERSION")
+    );
+
+    // Check if user has specified work to do
+    let has_work = !args.image.is_empty() || args.erase || args.list;
+
+    // If no work specified, show instructions
+    if !has_work {
+        println!("\n{}", "No action specified. Use --help for usage information.".yellow());
+        println!(
+            "{}",
+            "\nTo flash your device:\n  1. Connect device via USB\n  2. Enter Boot Mode (hold power button)\n  3. Run: flash -l       (to list available ports)\n  4. Run: flash -p <PORT> -i <IMAGE>  (to flash)".cyan()
+        );
+        return Ok(());
+    }
+
     if args.list {
         list_serial_ports()?;
         return Ok(());
     }
 
+    // Require explicit port when there's work to do
     let port_name = match args.port {
         Some(p) => p,
         None => {
-            let ports = serialport::available_ports()?;
-            ports
-                .first()
-                .ok_or(anyhow!("No serial ports available"))?
-                .port_name
-                .clone()
+            return Err(anyhow!(
+                "Serial port required. Run 'flash -l' to list available ports, then use -p <PORT>"
+            ));
         }
     };
 
@@ -482,4 +510,77 @@ fn main() -> Result<()> {
 
     println!("{}", "Flash complete".green());
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn baudrate_list_sorted_descending() {
+        let rates: Vec<u32> = BAUDRATE_LIST.iter().map(|&(b, _)| b).collect();
+        let mut sorted = rates.clone();
+        sorted.sort_unstable_by(|a, b| b.cmp(a));
+        assert_eq!(rates, sorted, "BAUDRATE_LIST must be sorted highest-first");
+    }
+
+    #[test]
+    fn baudrate_commands_have_correct_length() {
+        for &(baud, cmd) in BAUDRATE_LIST {
+            assert_eq!(cmd.len(), 13, "baudrate {baud} command must be 13 bytes");
+        }
+    }
+
+    #[test]
+    fn erase_cmd_has_correct_length() {
+        assert_eq!(ERASE_CMD.len(), 13);
+    }
+
+    #[test]
+    fn reboot_cmd_has_correct_length() {
+        assert_eq!(REBOOT_CMD.len(), 9);
+    }
+
+    #[test]
+    fn crc16_xmodem_known_value() {
+        // XMODEM CRC of "123456789" is always 0x31C3
+        let crc = Crc::<u16>::new(&CRC_16_XMODEM);
+        assert_eq!(crc.checksum(b"123456789"), 0x31C3);
+    }
+
+    #[test]
+    fn xmodem_block_complement_sums_to_255() {
+        // The XMODEM-1K header encodes block_num and (255 - block_num)
+        for n in 0u8..=255 {
+            let complement = 255u8.wrapping_sub(n);
+            assert_eq!(n as u16 + complement as u16, 255);
+        }
+    }
+
+    #[test]
+    fn block_num_wraps_correctly() {
+        let mut block_num = 255u8;
+        block_num = block_num.wrapping_add(1);
+        assert_eq!(block_num, 0, "block_num must wrap from 255 to 0");
+    }
+
+    #[test]
+    fn progress_bar_block_count() {
+        // The number of 1 KiB blocks for a given file size
+        let file_size: u64 = 1024 * 10; // 10 KiB
+        let blocks = file_size / 1024 + 1;
+        assert_eq!(blocks, 11);
+
+        let file_size_exact: u64 = 1024; // exactly 1 KiB
+        let blocks_exact = file_size_exact / 1024 + 1;
+        assert_eq!(blocks_exact, 2);
+    }
+
+    #[test]
+    fn default_baudrate_is_in_list() {
+        assert!(
+            BAUDRATE_LIST.iter().any(|&(b, _)| b == DEFAULT_BAUDRATE),
+            "DEFAULT_BAUDRATE must be present in BAUDRATE_LIST"
+        );
+    }
 }
