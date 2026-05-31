@@ -27,13 +27,30 @@ and display captures when you trigger a dump from the device.
 
 ### Triggering a capture on the device
 
+There are two independent capture methods:
+
+#### Method 1 — ASCII debug dump (full buffer)
+
 1. Feed a signal into the scope.
 2. Press **Stop** to freeze the sample buffer.
 3. Press **Menu**, then **Stop** so the Channel 1 Measurements menu is visible.
 4. **Long-press Save** to initiate the debug data transmission.
 
-The app detects end-of-transmission after 500 ms of silence and parses the
-received data.
+Transfers ~150–500 kB at 115200 baud. Delivers 60 000 raw ADC samples per
+channel. Use `V/div` and `t/div` in the Measurement panel to set the scale.
+
+#### Method 2 — Screenshot binary packet (display pixels)
+
+1. Save a waveform on the device (short-press Save while viewing a signal).
+2. Navigate to **Gallery** (Screenshots view) on the device.
+3. Select the saved waveform — the device automatically transmits a **2048-byte
+   binary packet** containing the 300 display pixels plus all instrument settings.
+
+The app detects this packet by its size and decodes the embedded calibration
+data to set `V/div` and `t/div` automatically.
+
+Use the `capture` CLI tool to capture and analyze screenshot packets from the
+command line (see [CLI tools](#cli-tools) below).
 
 ### Auto-reconnect
 
@@ -57,11 +74,15 @@ At the top of the **Measurement** panel you can set the real-world scale:
 
 | Field    | Default | Meaning                                         |
 |----------|---------|-------------------------------------------------|
-| V/cell   | 1.0 V   | Volts per vertical division on the scope screen |
-| t/cell   | 1.0 ms  | Time per horizontal division                    |
+| V/div   | 1.0 V   | Volts per vertical division on the scope screen |
+| t/div   | 1.0 ms  | Time per horizontal division                    |
+| V/off   | 0.0 V   | Voltage at graph center (offset)                |
 
 The DSO3D12 screen has **8 vertical** and **12 horizontal** divisions (AC mode).
 All voltage and time calculations, axis labels, and PNG scales use these values.
+
+When a capture arrives via the **screenshot protocol**, V/div, t/div, and V/offset
+are automatically filled from the packet's embedded settings metadata.
 
 ## Measurement cursors
 
@@ -79,18 +100,24 @@ between cursors is drawn on the canvas in pink and updates in real time.
 ### Signal information
 
 When a capture is loaded the panel also shows:
-* Voltage range for each channel (derived from V/cell setting).
-* Total time range (derived from t/cell setting) + sample count.
+* Voltage range for each channel (derived from V/div setting).
+* Total time range (derived from t/div setting) + sample count.
 * Per-channel statistics (sample count, min, max, average ADC).
 
 ## Device cursors
 
-If a capture contains device-set cursor data, the **Device X** / **Device Y**
-toggles in the controls panel become enabled. These cursors are drawn as green
-lines and **cannot be moved** — they reflect the device's own measurement state.
+If a capture contains device-set cursor data (from the screenshot protocol),
+the **Device X** / **Device Y** toggles in the controls panel become enabled.
+These cursors are drawn as green lines and **cannot be moved** — they reflect
+the device's own cursor state at the moment of capture.
 
-Currently the parser does not extract device-cursor metadata, so these toggles
-remain disabled.
+## Trigger & auto-measurements
+
+When a capture comes from the screenshot protocol, the measurement panel shows:
+* **Trigger info**: mode (Auto/Normal/Single), edge, source, level, delay,
+  sample rate.
+* **Auto-measurements table**: two columns (CH1, CH2) with Freq, PkPk, Avg,
+  RMS, Amp, ±Duty, ±T, T, Max, Min, Top, Base — all in physical units.
 
 ## Thumbnails
 
@@ -102,7 +129,7 @@ thumbnail to switch the active capture.
 
 | Button          | Action                                                        |
 |-----------------|---------------------------------------------------------------|
-| Save Capture    | Writes the raw dump to a `.bin` file.                         |
+| Save Capture    | Writes all captures in `.zwcap` container format (CBOR).      |
 | Save PNG        | Exports a 1200×600 px PNG image of the graph with grid+traces.|
 | Export Data     | Writes a CSV file with columns `index, ch1 [, ch2]`.          |
 
@@ -121,12 +148,45 @@ Settings are persisted to:
 
 ## Logs
 
-Activity is logged to `<config_dir>/dso3d12-gui/dso3d12-gui.log` and stderr.
-Rotation at ~1 MB. Increase verbosity:
+Activity is logged to stderr (console) by default. File logging to
+`<config_dir>/dso3d12-gui/dso3d12-gui.log` can be enabled by setting
+`DSO_LOG_FILE=1`. Rotation at ~1 MB. Increase verbosity:
 
 ```bash
 RUST_LOG=debug dso3d12-gui
+# Or with file logging:
+DSO_LOG_FILE=1 RUST_LOG=debug dso3d12-gui
 ```
+
+---
+
+## CLI tools
+
+### `capture` — screenshot packet capture
+
+```bash
+# List available serial ports:
+capture -l
+
+# Wait for a screenshot packet on the default port and print a verbose report:
+capture
+
+# Specify port, save raw binary and timeout:
+capture --port /dev/tty.usbserial-1110 --save capture.bin --timeout 60
+
+# Parse as a different device variant:
+capture --device dso2512g-v2
+```
+
+**Steps:**
+1. Connect the DSO3D12 via USB.
+2. Run `capture` (it will wait for the device).
+3. On the scope: **Gallery → select a saved waveform**.
+4. The device transmits a 2048-byte packet; `capture` parses and prints the
+   full verbose report including calibrated waveform points and auto-measurements.
+
+If `--save path.bin` is specified the raw packet is written to disk for later
+re-analysis or use with custom tooling.
 
 ## Troubleshooting
 
@@ -141,7 +201,7 @@ RUST_LOG=debug dso3d12-gui
 
 ## Voltage & time reference
 
-* Voltage range = V/cell × 8 cells (centered at 0 → ±4 × V/cell).
-* Time range = t/cell × 12 cells.
-* Set V/cell and t/cell in the Measurement panel to match your scope settings.
+* Voltage range = V/div × 8 divs (centered at 0 → ±4 × V/div).
+* Time range = t/div × 12 divs.
+* Set V/div and t/div in the Measurement panel to match your scope settings.
 * These defaults will be refined when device metadata parsing is extended.

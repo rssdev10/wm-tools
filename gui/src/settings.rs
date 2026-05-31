@@ -31,19 +31,22 @@ pub struct Settings {
     pub alert_on_data: bool,
     /// Automatically start listening when the configured port appears.
     pub auto_listen: bool,
-    /// Volts per cell (division) for the scope grid. Default 1.0 V/cell.
-    #[serde(default = "default_v_per_cell")]
-    pub v_per_cell: f64,
-    /// Time per cell (division) in milliseconds. Default 1.0 ms/cell.
-    #[serde(default = "default_t_per_cell_ms")]
-    pub t_per_cell_ms: f64,
+    /// Volts per division for the scope grid. Default 1.0 V/div.
+    #[serde(default = "default_v_per_div")]
+    pub v_per_div: f64,
+    /// Time per division in milliseconds. Default 1.0 ms/div.
+    #[serde(default = "default_t_per_div_ms")]
+    pub t_per_div_ms: f64,
+    /// Voltage offset (zero-level of graph) in volts. Default 0.0 V.
+    #[serde(default)]
+    pub v_offset: f64,
 }
 
-fn default_v_per_cell() -> f64 {
+fn default_v_per_div() -> f64 {
     1.0
 }
 
-fn default_t_per_cell_ms() -> f64 {
+fn default_t_per_div_ms() -> f64 {
     1.0
 }
 
@@ -87,8 +90,9 @@ impl Default for Settings {
             split_png: false,
             alert_on_data: true,
             auto_listen: false,
-            v_per_cell: 1.0,
-            t_per_cell_ms: 1.0,
+            v_per_div: 1.0,
+            t_per_div_ms: 1.0,
+            v_offset: 0.0,
         }
     }
 }

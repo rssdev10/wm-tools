@@ -9,11 +9,16 @@ repository = "https://github.com/rssdev10/wm-tools"
 name = "flash"
 path = "src/flash.rs"
 
+[[bin]]
+name = "capture"
+path = "src/capture.rs"
+
 [dependencies]
 anyhow = "1.0"
 clap = { version = "4.0", features = ["derive"] }
 colored = "3.0"
 crc = "3.0"
+dso-parser = { path = "../dso-parser" }
 indicatif = "0.18"
 serialport = "4.9.0"
 tabled = "0.20"

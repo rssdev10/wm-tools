@@ -9,7 +9,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use dso3d12_parser::{parse_captures, Capture};
+use dso_parser::{parse_captures, is_screenshot_packet, Capture};
 use tokio::sync::mpsc;
 
 /// Configuration for serial capture.
@@ -52,8 +52,10 @@ impl Drop for SerialHandle {
 /// Events emitted by the serial listener.
 #[derive(Debug, Clone)]
 pub enum SerialEvent {
-    /// A complete capture was received and parsed.
+    /// A complete capture was received and parsed (ASCII debug dump).
     CaptureReceived(Vec<Capture>),
+    /// A binary screenshot packet was received (2048 bytes).
+    ScreenshotReceived(Vec<u8>),
     /// Bytes received so far (progress indicator: total bytes buffered).
     Progress(usize),
     /// An error occurred (port disconnected, parse failure, etc.).
@@ -184,17 +186,23 @@ fn read_loop(
         // Check if we have buffered data and the timeout has elapsed.
         if !accum.is_empty() && last_data.elapsed() >= CAPTURE_TIMEOUT {
             log::info!("capture timeout; {} bytes buffered, parsing…", accum.len());
-            match parse_captures(&accum) {
-                Ok(captures) if !captures.is_empty() => {
-                    let _ = tx.send(SerialEvent::CaptureReceived(captures));
-                }
-                Ok(_) => {
-                    let _ = tx.send(SerialEvent::Error(
-                        "Received data but no valid captures found.".to_string(),
-                    ));
-                }
-                Err(e) => {
-                    let _ = tx.send(SerialEvent::Error(format!("Parse error: {e}")));
+            // Detect format: screenshot binary (2034–2056 bytes) vs ASCII debug dump
+            if is_screenshot_packet(&accum) {
+                log::info!("detected screenshot packet ({} bytes)", accum.len());
+                let _ = tx.send(SerialEvent::ScreenshotReceived(accum.clone()));
+            } else {
+                match parse_captures(&accum) {
+                    Ok(captures) if !captures.is_empty() => {
+                        let _ = tx.send(SerialEvent::CaptureReceived(captures));
+                    }
+                    Ok(_) => {
+                        let _ = tx.send(SerialEvent::Error(
+                            "Received data but no valid captures found.".to_string(),
+                        ));
+                    }
+                    Err(e) => {
+                        let _ = tx.send(SerialEvent::Error(format!("Parse error: {e}")));
+                    }
                 }
             }
             accum.clear();

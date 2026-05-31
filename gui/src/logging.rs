@@ -59,16 +59,23 @@ impl log::Log for FileLogger {
 
 /// Initialize global logger. Safe to call multiple times; only the first call
 /// installs the logger.
+///
+/// By default only stderr logging is active (no file). Set `DSO_LOG_FILE=1`
+/// to enable the file logger.
 pub fn init() {
     let stderr_level = std::env::var("RUST_LOG")
         .ok()
         .and_then(|s| s.parse::<Level>().ok())
         .unwrap_or(Level::Info);
 
-    let file = log_path().and_then(|p| {
-        rotate_if_needed(&p);
-        OpenOptions::new().create(true).append(true).open(&p).ok()
-    });
+    let file = if std::env::var("DSO_LOG_FILE").is_ok() {
+        log_path().and_then(|p| {
+            rotate_if_needed(&p);
+            OpenOptions::new().create(true).append(true).open(&p).ok()
+        })
+    } else {
+        None
+    };
 
     let logger = FileLogger {
         file: Mutex::new(file),

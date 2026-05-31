@@ -11,7 +11,7 @@ name = "dso3d12-gui"
 path = "src/main.rs"
 
 [dependencies]
-dso3d12-parser = { path = "../dso3d12-parser" }
+dso-parser = { path = "../dso-parser" }
 anyhow = { workspace = true }
 log = { workspace = true, features = ["std"] }
 thiserror = { workspace = true }

@@ -1,7 +1,7 @@
 //! Oscilloscope-style graph canvas (iced::widget::canvas).
 
 use crate::settings::ViewMode;
-use dso3d12_parser::Capture;
+use dso_parser::Capture;
 use iced::widget::canvas::{self, Frame, Geometry, Path, Stroke, Text};
 use iced::{mouse, Color, Point, Rectangle, Renderer, Size, Theme};
 
@@ -27,10 +27,12 @@ pub struct Scope<'a, Message = ()> {
     pub has_ch1: bool,
     /// Whether CH2 data is present in the capture (for scale labelling).
     pub has_ch2: bool,
-    /// Volts per cell (vertical division). 8 cells total.
-    pub v_per_cell: f64,
-    /// Time per cell (horizontal division) in milliseconds. 12 cells total.
-    pub t_per_cell_ms: f64,
+    /// Volts per division. 8 divisions total.
+    pub v_per_div: f64,
+    /// Time per division in milliseconds. 12 divisions total.
+    pub t_per_div_ms: f64,
+    /// Voltage offset (voltage at graph center).
+    pub v_offset: f64,
     /// Callback message factory for graph clicks: (frac_x, frac_y).
     pub on_click: Option<fn(f32, f32) -> Message>,
 }
@@ -152,9 +154,7 @@ impl<Message: Clone> canvas::Program<Message> for Scope<'_, Message> {
             }
             if self.show_ch2 {
                 if let Some(ch2) = cap.ch2.as_ref() {
-                    // CH2 is stored inverted in the debug dump; flip to match device display.
-                    let flipped: Vec<u8> = ch2.iter().map(|&v| 255 - v).collect();
-                    draw_trace(&mut frame, &flipped, CH2_COLOR, self.view_mode);
+                    draw_trace(&mut frame, ch2, CH2_COLOR, self.view_mode);
                 }
             }
         } else {
@@ -270,8 +270,9 @@ impl<Message: Clone> canvas::Program<Message> for Scope<'_, Message> {
                 self.n_samples,
                 self.has_ch1,
                 self.has_ch2,
-                self.v_per_cell,
-                self.t_per_cell_ms,
+                self.v_per_div,
+                self.t_per_div_ms,
+                self.v_offset,
             );
         }
 
@@ -313,9 +314,9 @@ fn draw_grid(frame: &mut Frame, size: Size) {
 
 const SCALE_COLOR: Color = Color::from_rgb(0.60, 0.65, 0.70);
 
-/// Number of vertical divisions (cells) on the oscilloscope screen for voltage.
+/// Number of vertical divisions on the oscilloscope screen for voltage.
 const V_CELLS: usize = 8;
-/// Number of horizontal divisions (cells) on the oscilloscope screen for time.
+/// Number of horizontal divisions on the oscilloscope screen for time.
 const T_CELLS: usize = 12;
 
 fn draw_scales(
@@ -323,16 +324,17 @@ fn draw_scales(
     _n_samples: usize,
     has_ch1: bool,
     has_ch2: bool,
-    v_per_cell: f64,
-    t_per_cell_ms: f64,
+    v_per_div: f64,
+    t_per_div_ms: f64,
+    v_offset: f64,
 ) {
     let size = frame.size();
     let rows = V_CELLS;
     let cols = 10; // grid visual divisions (drawn grid is 10 columns)
 
     // X axis: time labels at each visual division.
-    // Total time span = T_CELLS * t_per_cell_ms. We distribute over the sample window.
-    let total_time_ms = T_CELLS as f64 * t_per_cell_ms;
+    // Total time span = T_CELLS * t_per_div_ms. We distribute over the sample window.
+    let total_time_ms = T_CELLS as f64 * t_per_div_ms;
     let dx = size.width / cols as f32;
     for i in 0..=cols {
         let frac = i as f64 / cols as f64;
@@ -353,17 +355,17 @@ fn draw_scales(
         frame.fill_text(label);
     }
 
-    // Y axis: voltage scale. Total range = V_CELLS * v_per_cell, centered around 0.
-    // Top = +half_range, bottom = -half_range (AC mode).
-    let half_range_v = (rows as f64 * v_per_cell) / 2.0;
+    // Y axis: voltage scale. Total range = V_CELLS * v_per_div, centered around v_offset.
+    // Top = v_offset + half_range, bottom = v_offset - half_range (AC mode).
+    let half_range_v = (rows as f64 * v_per_div) / 2.0;
     let ch1_x_offset = 2.0;
     let ch2_x_offset = if has_ch1 { 42.0 } else { 2.0 };
 
     if has_ch1 {
         for i in 0..=rows {
             let frac = i as f32 / rows as f32;
-            // frac=0 → top → +half_range; frac=1 → bottom → -half_range
-            let voltage = half_range_v * (1.0 - 2.0 * frac as f64);
+            // frac=0 → top → v_offset+half_range; frac=1 → bottom → v_offset-half_range
+            let voltage = v_offset + half_range_v * (1.0 - 2.0 * frac as f64);
             let y = frac * size.height;
             let label = Text {
                 content: format!("{voltage:.2}V"),
@@ -379,7 +381,7 @@ fn draw_scales(
     if has_ch2 {
         for i in 0..=rows {
             let frac = i as f32 / rows as f32;
-            let voltage = half_range_v * (1.0 - 2.0 * frac as f64);
+            let voltage = v_offset + half_range_v * (1.0 - 2.0 * frac as f64);
             let y = frac * size.height;
             let label = Text {
                 content: format!("{voltage:.2}V"),

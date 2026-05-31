@@ -2,7 +2,7 @@
 resolver = "2"
 members = [
     "flasher",
-    "dso3d12-parser",
+    "dso-parser",
     "gui",
 ]
 

@@ -3,7 +3,7 @@
 use std::path::PathBuf;
 
 use chrono::{DateTime, Local};
-use dso3d12_parser::{Capture, DEFAULT_BUFFER_DEPTH};
+use dso_parser::{Capture, DEFAULT_BUFFER_DEPTH};
 use iced::widget::{
     button, canvas, checkbox, column, container, pick_list, progress_bar, row, rule,
     scrollable, text, text_input, Space,
@@ -49,9 +49,10 @@ pub enum Message {
     ToggleMeasCursorY(bool),
     MeasCursorXChanged(f32, f32),
     MeasCursorYChanged(f32, f32),
-    // Scale inputs (V/cell, time/cell)
+    // Scale inputs (V/div, time/div, V offset)
     VPerCellChanged(String),
     TPerCellChanged(String),
+    VOffsetChanged(String),
     // Graph click — move nearest cursor
     GraphClicked(f32, f32),
     // Misc
@@ -75,8 +76,8 @@ pub enum Message {
     FirmwareEvent(#[allow(dead_code)] crate::flash::FlashEvent),
     // Port scan tick (auto-refresh)
     PortScanTick,
-    // Open repository URL in browser
-    OpenRepoUrl,
+    // Open a URL in the default browser
+    OpenUrl(String),
     // Context menu on thumbnails (right-click via iced_aw::ContextMenu)
     ContextMenuDeleteAt(usize),
     ContextMenuExportPngAt(usize),
@@ -86,10 +87,15 @@ pub enum Message {
 }
 
 /// A capture paired with the timestamp of when it was received/loaded.
+/// Holds both the legacy `Capture` (for rendering) and the rich `CaptureRecord`
+/// (for metadata, measurements, and serialization).
 #[derive(Debug, Clone)]
 pub struct CaptureEntry {
     pub capture: Capture,
     pub timestamp: DateTime<Local>,
+    /// Full record with metadata (always present for new captures; may be
+    /// synthesized from legacy data when loading old files).
+    pub record: dso_parser::CaptureRecord,
 }
 
 #[derive(Debug, Clone)]
@@ -129,10 +135,12 @@ pub struct App {
     was_listening_before_flash: bool,
     /// Target capture index for context menu export operations.
     context_export_idx: Option<usize>,
-    /// Text input state for V/cell scale.
-    v_per_cell_input: String,
-    /// Text input state for time/cell scale.
-    t_per_cell_input: String,
+    /// Text input state for V/div scale.
+    v_per_div_input: String,
+    /// Text input state for t/div scale.
+    t_per_div_input: String,
+    /// Text input state for V/offset.
+    v_offset_input: String,
 }
 
 impl App {
@@ -146,8 +154,9 @@ impl App {
         );
         let baud_str = settings.baud_rate.to_string();
         let port_str = settings.serial_port.clone().unwrap_or_default();
-        let v_per_cell_str = format_float(settings.v_per_cell);
-        let t_per_cell_str = format_float(settings.t_per_cell_ms);
+        let v_per_div_str = format_float(settings.v_per_div);
+        let t_per_div_str = format_float(settings.t_per_div_ms);
+        let v_offset_str = format_float(settings.v_offset);
         (
             Self {
                 settings,
@@ -172,8 +181,9 @@ impl App {
                 firmware_confirming: false,
                 was_listening_before_flash: false,
                 context_export_idx: None,
-                v_per_cell_input: v_per_cell_str,
-                t_per_cell_input: t_per_cell_str,
+                v_per_div_input: v_per_div_str,
+                t_per_div_input: t_per_div_str,
+                v_offset_input: v_offset_str,
             },
             Task::none(),
         )
@@ -210,10 +220,16 @@ impl App {
     }
 
     pub(crate) fn capture_has_device_cursor_x(&self) -> bool {
-        false
+        self.current_entry()
+            .and_then(|e| e.record.scope_state.as_ref())
+            .map(|s| s.cursors_x_enable)
+            .unwrap_or(false)
     }
     pub(crate) fn capture_has_device_cursor_y(&self) -> bool {
-        false
+        self.current_entry()
+            .and_then(|e| e.record.scope_state.as_ref())
+            .map(|s| s.cursors_y_enable)
+            .unwrap_or(false)
     }
 
     // ── Subscription for serial events ─────────────────────────────────
@@ -410,7 +426,10 @@ impl App {
                                 let now = Local::now();
                                 let entries: Vec<CaptureEntry> = captures
                                     .into_iter()
-                                    .map(|capture| CaptureEntry { capture, timestamp: now })
+                                    .map(|capture| {
+                                        let record = dso_parser::capture_to_record(&capture, now, None);
+                                        CaptureEntry { capture, timestamp: now, record }
+                                    })
                                     .collect();
                                 // Append to existing dump rather than replacing.
                                 if let Some(ref mut dump) = self.dump {
@@ -430,6 +449,55 @@ impl App {
                                     "Received {count} capture(s). Total: {}",
                                     self.dump.as_ref().map(|d| d.captures.len()).unwrap_or(0)
                                 );
+                            }
+                            SerialEvent::ScreenshotReceived(raw_bytes) => {
+                                log::info!("received screenshot packet ({} bytes)", raw_bytes.len());
+                                if self.settings.alert_on_data {
+                                    play_beep_end();
+                                }
+                                let now = Local::now();
+                                match dso_parser::parse_screenshot(&raw_bytes) {
+                                    Ok(pkt) => {
+                                        let record = dso_parser::screenshot_to_record(&pkt, now, &raw_bytes);
+                                        let capture = pkt.to_capture();
+                                        // Auto-fill scale from screenshot metadata
+                                        let s = &pkt.settings;
+                                        let probe1 = 10f64.powi(s.ch1.probe_mode as i32);
+                                        self.settings.v_per_div = s.ch1.volt_scale_uv as f64 / 1_000_000.0 * probe1;
+                                        self.settings.t_per_div_ms = s.timebase_ns_per_div as f64 / 1_000_000.0;
+                                        self.settings.v_offset = s.ch1.zero_volt_uv as f64 / 1_000_000.0 * probe1;
+                                        self.v_per_div_input = format_float(self.settings.v_per_div);
+                                        self.t_per_div_input = format_float(self.settings.t_per_div_ms);
+                                        self.v_offset_input = format_float(self.settings.v_offset);
+                                        self.settings.save();
+
+                                        let entry = CaptureEntry { capture, timestamp: now, record };
+                                        if let Some(ref mut dump) = self.dump {
+                                            let prev_len = dump.captures.len();
+                                            dump.captures.push(entry);
+                                            self.current = prev_len;
+                                        } else {
+                                            self.dump = Some(LoadedDump {
+                                                path: PathBuf::from("<serial>"),
+                                                captures: vec![entry],
+                                            });
+                                            self.current = 0;
+                                        }
+                                        self.capture_progress = 0;
+                                        self.status = format!(
+                                            "Screenshot received ({}/div, {}/div). Total: {}",
+                                            dso_parser::format_uv(
+                                                (self.settings.v_per_div * 1_000_000.0) as i64, 0
+                                            ),
+                                            s.timebase_label(),
+                                            self.dump.as_ref().map(|d| d.captures.len()).unwrap_or(0)
+                                        );
+                                    }
+                                    Err(e) => {
+                                        self.status = format!("Screenshot parse error: {e}");
+                                        log::error!("screenshot parse: {e}");
+                                    }
+                                }
                             }
                             SerialEvent::Error(e) => {
                                 self.status = format!("Serial: {e}");
@@ -484,21 +552,31 @@ impl App {
                 Task::none()
             }
             Message::VPerCellChanged(s) => {
-                self.v_per_cell_input = s.clone();
+                self.v_per_div_input = s.clone();
                 // Accept both decimal ("0.001") and scientific notation ("1e-3")
                 if let Ok(v) = s.parse::<f64>() {
                     if v > 0.0 && v.is_finite() {
-                        self.settings.v_per_cell = v;
+                        self.settings.v_per_div = v;
                         self.settings.save();
                     }
                 }
                 Task::none()
             }
             Message::TPerCellChanged(s) => {
-                self.t_per_cell_input = s.clone();
+                self.t_per_div_input = s.clone();
                 if let Ok(v) = s.parse::<f64>() {
                     if v > 0.0 && v.is_finite() {
-                        self.settings.t_per_cell_ms = v;
+                        self.settings.t_per_div_ms = v;
+                        self.settings.save();
+                    }
+                }
+                Task::none()
+            }
+            Message::VOffsetChanged(s) => {
+                self.v_offset_input = s.clone();
+                if let Ok(v) = s.parse::<f64>() {
+                    if v.is_finite() {
+                        self.settings.v_offset = v;
                         self.settings.save();
                     }
                 }
@@ -595,8 +673,7 @@ impl App {
                 }
                 Task::none()
             }
-            Message::OpenRepoUrl => {
-                let url = env!("CARGO_PKG_REPOSITORY");
+            Message::OpenUrl(url) => {
                 let _ = open::that(url);
                 Task::none()
             }
@@ -889,7 +966,7 @@ impl App {
                 rule::horizontal(1),
                 text(format!("DSO3D12 GUI v{ver}")).size(13),
                 button(text(repo).size(11))
-                    .on_press(Message::OpenRepoUrl)
+                    .on_press(Message::OpenUrl(repo.to_string()))
                     .style(button::text),
                 text(format!("Config: {config_path}")).size(11),
                 Space::new().height(Length::Fixed(8.0)),
@@ -1087,10 +1164,25 @@ impl App {
             } else {
                 None
             },
-            device_cursor_x: None,
-            device_cursor_y: None,
-            v_per_cell: self.settings.v_per_cell,
-            t_per_cell_ms: self.settings.t_per_cell_ms,
+            device_cursor_x: if self.settings.device_cursor_x_enabled {
+                self.current_entry()
+                    .and_then(|e| e.record.scope_state.as_ref())
+                    .filter(|s| s.cursors_x_enable)
+                    .map(|s| (s.cursor_x1_frac as f32, s.cursor_x2_frac as f32))
+            } else {
+                None
+            },
+            device_cursor_y: if self.settings.device_cursor_y_enabled {
+                self.current_entry()
+                    .and_then(|e| e.record.scope_state.as_ref())
+                    .filter(|s| s.cursors_y_enable)
+                    .map(|s| (s.cursor_y1_frac as f32, s.cursor_y2_frac as f32))
+            } else {
+                None
+            },
+            v_per_div: self.settings.v_per_div,
+            t_per_div_ms: self.settings.t_per_div_ms,
+            v_offset: self.settings.v_offset,
             on_click: Some(Message::GraphClicked),
         };
         canvas(scope)
@@ -1108,10 +1200,11 @@ impl App {
         let (ylo, yhi) = self.settings.cursor_y_range;
 
         // Scale parameters
-        let v_per_cell = self.settings.v_per_cell;
-        let t_per_cell_ms = self.settings.t_per_cell_ms;
-        let half_v_range = 4.0 * v_per_cell; // 8 cells / 2
-        let total_time_ms = 12.0 * t_per_cell_ms;
+        let v_per_div = self.settings.v_per_div;
+        let t_per_div_ms = self.settings.t_per_div_ms;
+        let v_offset = self.settings.v_offset;
+        let half_v_range = 4.0 * v_per_div; // 8 div / 2
+        let total_time_ms = 12.0 * t_per_div_ms;
 
         // ── Signal information ──
         let mut items: Vec<Element<'_, Message>> = vec![
@@ -1122,8 +1215,8 @@ impl App {
         // ── Scale inputs ──
         items.push(
             row![
-                text("V/cell:").size(11),
-                text_input("1.0", &self.v_per_cell_input)
+                text("V/div:").size(11),
+                text_input("1.0", &self.v_per_div_input)
                     .on_input(Message::VPerCellChanged)
                     .size(11)
                     .width(Length::Fixed(50.0)),
@@ -1135,8 +1228,8 @@ impl App {
         );
         items.push(
             row![
-                text("t/cell:").size(11),
-                text_input("1.0", &self.t_per_cell_input)
+                text("t/div:").size(11),
+                text_input("1.0", &self.t_per_div_input)
                     .on_input(Message::TPerCellChanged)
                     .size(11)
                     .width(Length::Fixed(50.0)),
@@ -1147,13 +1240,26 @@ impl App {
             .into(),
         );
         items.push(
-            text("AC mode: 8×V, 12×t cells").size(9).into(),
+            row![
+                text("V/off:").size(11),
+                text_input("0.0", &self.v_offset_input)
+                    .on_input(Message::VOffsetChanged)
+                    .size(11)
+                    .width(Length::Fixed(50.0)),
+                text("V").size(11),
+            ]
+            .spacing(4)
+            .align_y(iced::Alignment::Center)
+            .into(),
+        );
+        items.push(
+            text("AC mode: 8×V, 12×t div").size(9).into(),
         );
         items.push(rule::horizontal(1).into());
 
         if let Some(cap) = cap {
-            let v_min = frac_to_voltage(1.0, half_v_range); // bottom
-            let v_max = frac_to_voltage(0.0, half_v_range); // top
+            let v_min = frac_to_voltage(1.0, half_v_range, v_offset); // bottom
+            let v_max = frac_to_voltage(0.0, half_v_range, v_offset); // top
             items.push(
                 text(format!("CH1 range: {v_min:.2}V … {v_max:.2}V")).size(11).into(),
             );
@@ -1212,8 +1318,8 @@ impl App {
 
         if self.settings.measurement_cursor_y_enabled {
             items.push(range_slider::horizontal(ylo, yhi, Message::MeasCursorYChanged));
-            let v_lo = frac_to_voltage(ylo as f64, half_v_range);
-            let v_hi = frac_to_voltage(yhi as f64, half_v_range);
+            let v_lo = frac_to_voltage(ylo as f64, half_v_range, v_offset);
+            let v_hi = frac_to_voltage(yhi as f64, half_v_range, v_offset);
             let dv = (v_hi - v_lo).abs();
             items.push(
                 column![
@@ -1246,6 +1352,115 @@ impl App {
                         .size(10)
                         .into(),
                 );
+            }
+        }
+
+        // ── Trigger + measurements from screenshot metadata ──
+        if let Some(scope_state) = self.current_entry().and_then(|e| e.record.scope_state.as_ref()) {
+            items.push(rule::horizontal(1).into());
+            items.push(text("Trigger").size(11).into());
+            items.push(
+                text(format!(
+                    "Mode: {} | Edge: {} | Src: {}",
+                    scope_state.trigger_mode, scope_state.trigger_edge, scope_state.trigger_source
+                ))
+                .size(10)
+                .into(),
+            );
+            items.push(
+                text(format!("Level: {:.3} V", scope_state.trigger_level_v))
+                    .size(10)
+                    .into(),
+            );
+            items.push(
+                text(format!(
+                    "Delay: {:.6} s | Rate: {:.0} Sa/s",
+                    scope_state.trigger_delay_s, scope_state.sample_rate_hz
+                ))
+                .size(10)
+                .into(),
+            );
+
+            // ── Auto-measurements table ──
+            let has_m1 = scope_state.ch1.as_ref().and_then(|c| c.measurements.as_ref());
+            let has_m2 = scope_state.ch2.as_ref().and_then(|c| c.measurements.as_ref());
+            if has_m1.is_some() || has_m2.is_some() {
+                items.push(rule::horizontal(1).into());
+                items.push(text("Auto Measurements").size(11).into());
+
+                let fmt_v = |v: f64| -> String {
+                    if v.abs() >= 1.0 { format!("{v:.3} V") }
+                    else { format!("{:.2} mV", v * 1000.0) }
+                };
+                let fmt_t = |s: f64| -> String {
+                    if s >= 1.0 { format!("{s:.3} s") }
+                    else if s >= 0.001 { format!("{:.3} ms", s * 1000.0) }
+                    else { format!("{:.2} µs", s * 1_000_000.0) }
+                };
+                let fmt_hz = |hz: f64| -> String {
+                    if hz >= 1_000_000.0 { format!("{:.3} MHz", hz / 1_000_000.0) }
+                    else if hz >= 1000.0 { format!("{:.3} kHz", hz / 1000.0) }
+                    else { format!("{hz:.2} Hz") }
+                };
+
+                // Build measurement rows: label | CH1 | CH2
+                let labels = [
+                    "Freq", "PkPk", "Avg", "RMS", "Amp", "+Duty", "-Duty",
+                    "+T", "-T", "T", "Max", "Min", "Top", "Base",
+                ];
+                let ch_val = |m: Option<&dso_parser::ChannelMeasurements>, idx: usize| -> String {
+                    match m {
+                        None => "—".to_string(),
+                        Some(m) => {
+                            let fv = |v: f64| if v.is_nan() { "—".to_string() } else { fmt_v(v) };
+                            let ft = |v: f64| if v.is_nan() { "—".to_string() } else { fmt_t(v) };
+                            let fd = |v: f64| if v.is_nan() { "—".to_string() } else { format!("{:.1}%", v) };
+                            let fh = |v: f64| if v.is_nan() { "—".to_string() } else { fmt_hz(v) };
+                            match idx {
+                                0 => fh(m.freq_hz),
+                                1 => fv(m.pk_pk_v),
+                                2 => fv(m.avg_v),
+                                3 => fv(m.rms_v),
+                                4 => fv(m.amplitude_v),
+                                5 => fd(m.pos_duty_pct),
+                                6 => fd(m.neg_duty_pct),
+                                7 => ft(m.pos_width_s),
+                                8 => ft(m.neg_width_s),
+                                9 => ft(m.period_s),
+                                10 => fv(m.max_v),
+                                11 => fv(m.min_v),
+                                12 => fv(m.top_v),
+                                13 => fv(m.base_v),
+                                _ => "—".to_string(),
+                            }
+                        }
+                    }
+                };
+
+                // Header row
+                items.push(
+                    row![
+                        text("").size(9).width(Length::Fixed(36.0)),
+                        text("CH1").size(9).width(Length::Fixed(72.0)),
+                        text("CH2").size(9).width(Length::Fixed(72.0)),
+                    ]
+                    .spacing(2)
+                    .into(),
+                );
+
+                for (idx, lbl) in labels.iter().enumerate() {
+                    let v1 = ch_val(has_m1, idx);
+                    let v2 = ch_val(has_m2, idx);
+                    items.push(
+                        row![
+                            text(*lbl).size(9).width(Length::Fixed(36.0)),
+                            text(v1).size(9).width(Length::Fixed(72.0)),
+                            text(v2).size(9).width(Length::Fixed(72.0)),
+                        ]
+                        .spacing(2)
+                        .into(),
+                    );
+                }
             }
         }
 
@@ -1333,16 +1548,42 @@ impl App {
 // ── Helpers ────────────────────────────────────────────────────────────────
 
 fn instructions_panel<'a>() -> Element<'a, Message> {
-    let body = "How to capture from a ZeeWeii DSO3D12:\n\
+    let standard_fw = "Standard firmware (raw debug dump):\n\n\
         1. Feed a signal into the scope.\n\
         2. Press Stop to freeze the sample buffer.\n\
-        3. Press Menu, then Stop so the Channel 1 Measurements menu is on screen.\n\
-        4. Long-press the Save button to start the debug data transmission.\n\
-        5. Capture the serial stream into a .bin file and load it here.";
-    container(text(body).size(12))
-        .padding(8)
-        .style(container::rounded_box)
-        .into()
+        3. Press Menu → Stop so Channel 1\n   Measurements menu is on screen.\n\
+        4. Long-press the Save button to start\n   the debug data transmission.\n\
+        5. Wait until the transfer completes\n   (~300 kB at 115200 baud).";
+
+    let screenshot_fw = "Customized firmware:\n\
+        1. Capture a waveform on the device\n   (press Save while running or stopped).\n\
+        2. Press Menu → Gallery to open\n   the saved screenshots list.\n\
+        3. Select the waveform to transmit.\n\
+        4. The device sends a 2048-byte binary\n   packet automatically over USB-serial.\n\
+        5. Includes full metadata: V/div, timebase,\n   trigger, cursors, measurements.";
+
+    let left = container(text(standard_fw).size(11))
+        .padding(6)
+        .width(Length::FillPortion(1));
+    let right = container(
+        column![
+            button(text("ZeeTweak (GitHub)").size(11))
+                .on_press(Message::OpenUrl("https://github.com/taligentx/ZeeTweak".to_string()))
+                .style(button::text),
+            text(screenshot_fw).size(11),
+        ]
+        .spacing(2),
+    )
+        .padding(6)
+        .width(Length::FillPortion(1));
+
+    container(
+        row![left, rule::vertical(1), right]
+            .spacing(4)
+    )
+    .padding(4)
+    .style(container::rounded_box)
+    .into()
 }
 
 pub(crate) fn stats(samples: &[u8]) -> (u8, u8, f32) {
@@ -1368,7 +1609,7 @@ fn adc_to_voltage(adc: u8) -> f32 {
 }
 
 /// Convert a fractional position (0.0..1.0) on the Y axis to voltage
-/// using the user-configured V/cell scale.
+/// using the user-configured V/div scale.
 /// frac=0 → top → +half_range; frac=1 → bottom → -half_range.
 /// Format a float for display in a scale input field.
 /// Always shows a decimal point so the field looks like a float.
@@ -1384,8 +1625,8 @@ fn format_float(v: f64) -> String {
     }
 }
 
-fn frac_to_voltage(frac: f64, half_v_range: f64) -> f64 {
-    half_v_range * (1.0 - 2.0 * frac)
+fn frac_to_voltage(frac: f64, half_v_range: f64, v_offset: f64) -> f64 {
+    v_offset + half_v_range * (1.0 - 2.0 * frac)
 }
 
 /// Convert sample count to time in milliseconds at the default 1 MHz sample rate.
@@ -1470,7 +1711,7 @@ fn thumbnails<'a>(dump: &'a Option<LoadedDump>, current: usize) -> Element<'a, M
 
 async fn pick_file() -> Option<PathBuf> {
     rfd::AsyncFileDialog::new()
-        .add_filter("DSO3D12 raw dump", &["bin", "dat", "raw"])
+        .add_filter("ZeeWeii Capture", &["zwcap", "bin", "dat", "raw"])
         .add_filter("All files", &["*"])
         .pick_file()
         .await
@@ -1479,9 +1720,10 @@ async fn pick_file() -> Option<PathBuf> {
 
 async fn pick_save_bin() -> Option<PathBuf> {
     let now = chrono::Local::now();
-    let name = format!("capture_{}.bin", now.format("%Y%m%d_%H%M%S"));
+    let name = format!("capture_{}.zwcap", now.format("%Y%m%d_%H%M%S"));
     rfd::AsyncFileDialog::new()
-        .add_filter("DSO3D12 raw dump", &["bin"])
+        .add_filter("ZeeWeii Capture", &["zwcap"])
+        .add_filter("All files", &["*"])
         .set_file_name(&name)
         .save_file()
         .await
@@ -1522,14 +1764,36 @@ async fn pick_firmware_file() -> Option<PathBuf> {
 async fn load_dump(path: PathBuf) -> Result<LoadedDump, anyhow::Error> {
     log::info!("loading {}", path.display());
     let bytes = std::fs::read(&path)?;
-    let parser_entries = dso3d12_parser::load_captures_with_metadata(&bytes)?;
-    let entries: Vec<CaptureEntry> = parser_entries
-        .into_iter()
-        .map(|e| CaptureEntry {
-            capture: e.capture,
-            timestamp: e.timestamp,
-        })
-        .collect();
+
+    // Detect format: .zwcap container, binary screenshot, or ASCII debug dump
+    let entries = if dso_parser::is_zwcap(&bytes) {
+        // New container format
+        let records = dso_parser::deserialize_zwcap(&bytes)
+            .map_err(|e| anyhow::anyhow!("{e}"))?;
+        records.into_iter().map(|rec| {
+            let capture = dso_parser::record_to_capture(&rec);
+            let timestamp = rec.captured_at.as_ref()
+                .and_then(|s| chrono::DateTime::parse_from_str(s, "%Y-%m-%dT%H:%M:%S%:z").ok())
+                .map(|dt| dt.with_timezone(&Local))
+                .unwrap_or_else(Local::now);
+            CaptureEntry { capture, timestamp, record: rec }
+        }).collect()
+    } else if dso_parser::is_screenshot_packet(&bytes) {
+        // Single binary screenshot packet
+        let pkt = dso_parser::parse_screenshot(&bytes)?;
+        let now = Local::now();
+        let record = dso_parser::screenshot_to_record(&pkt, now, &bytes);
+        let capture = pkt.to_capture();
+        vec![CaptureEntry { capture, timestamp: now, record }]
+    } else {
+        // Try ASCII debug dump (legacy format)
+        let parser_entries = dso_parser::load_captures_with_metadata(&bytes)?;
+        parser_entries.into_iter().map(|e| {
+            let record = dso_parser::capture_to_record(&e.capture, e.timestamp, None);
+            CaptureEntry { capture: e.capture, timestamp: e.timestamp, record }
+        }).collect()
+    };
+
     Ok(LoadedDump { path, captures: entries })
 }
 
@@ -1569,17 +1833,13 @@ fn play_beep_end() {
 
 // ── File save/load helpers ─────────────────────────────────────────────────
 
-/// Save all captures to a file using the parser crate's serializer.
+/// Save all captures to a `.zwcap` container file.
 fn save_all_captures(path: &std::path::Path, entries: &[CaptureEntry]) -> anyhow::Result<()> {
-    // Convert GUI CaptureEntry to parser CaptureEntry
-    let parser_entries: Vec<dso3d12_parser::CaptureEntry> = entries
+    let records: Vec<dso_parser::CaptureRecord> = entries
         .iter()
-        .map(|e| dso3d12_parser::CaptureEntry {
-            capture: e.capture.clone(),
-            timestamp: e.timestamp,
-        })
+        .map(|e| e.record.clone())
         .collect();
-    let data = dso3d12_parser::serialize_captures(&parser_entries);
+    let data = dso_parser::serialize_zwcap(&records);
     std::fs::write(path, data)?;
     Ok(())
 }
@@ -1695,13 +1955,14 @@ fn export_png(path: &std::path::Path, cap: &Capture, settings: &Settings) -> any
         };
 
     // Helper to draw scale labels (simple 3x5 digit font).
-    let v_per_cell = settings.v_per_cell;
-    let t_per_cell_ms = settings.t_per_cell_ms;
+    let v_per_div = settings.v_per_div;
+    let t_per_div_ms = settings.t_per_div_ms;
+    let v_offset = settings.v_offset;
     let draw_scales_on_region =
         |pixels: &mut Vec<u8>, x_off: u32, y_off: u32, w: u32, h: u32, _n_samples: usize, ch1_color: Option<[u8; 3]>, ch2_color: Option<[u8; 3]>| {
             // X axis: time labels at bottom
             let cols = 10u32;
-            let total_time_ms = 12.0 * t_per_cell_ms;
+            let total_time_ms = 12.0 * t_per_div_ms;
             for i in 0..=cols {
                 let frac = i as f64 / cols as f64;
                 let time_ms = frac * total_time_ms;
@@ -1717,12 +1978,12 @@ fn export_png(path: &std::path::Path, cap: &Capture, settings: &Settings) -> any
 
             // Y axis: voltage labels on left margin, per-channel
             let rows = 8u32;
-            let half_v_range = 4.0 * v_per_cell;
+            let half_v_range = 4.0 * v_per_div;
             let x_ch1 = 2u32;
             let x_ch2 = if ch1_color.is_some() { 26u32 } else { 2u32 };
             for i in 0..=rows {
                 let frac = i as f64 / rows as f64;
-                let voltage = half_v_range * (1.0 - 2.0 * frac);
+                let voltage = v_offset + half_v_range * (1.0 - 2.0 * frac);
                 let label = format!("{voltage:.1}");
                 let y_pos = y_off + (i * h / rows);
                 if let Some(c) = ch1_color {
@@ -1749,8 +2010,7 @@ fn export_png(path: &std::path::Path, cap: &Capture, settings: &Settings) -> any
         let y_off_2 = graph_h + scale_margin_bottom;
         draw_grid(&mut pixels, scale_margin_left, y_off_2, graph_w, sub_h);
         if let Some(ch2) = &cap.ch2 {
-            let flipped: Vec<u8> = ch2.iter().map(|&v| 255 - v).collect();
-            draw_ch(&mut pixels, &flipped, [38, 217, 255], scale_margin_left, y_off_2, graph_w, sub_h);
+            draw_ch(&mut pixels, ch2, [38, 217, 255], scale_margin_left, y_off_2, graph_w, sub_h);
         }
         if settings.show_scales {
             let ch2_col = Some([38u8, 217, 255]);
@@ -1765,8 +2025,7 @@ fn export_png(path: &std::path::Path, cap: &Capture, settings: &Settings) -> any
         }
         if settings.show_ch2 {
             if let Some(ch2) = &cap.ch2 {
-                let flipped: Vec<u8> = ch2.iter().map(|&v| 255 - v).collect();
-                draw_ch(&mut pixels, &flipped, [38, 217, 255], scale_margin_left, 0, graph_w, graph_h);
+                draw_ch(&mut pixels, ch2, [38, 217, 255], scale_margin_left, 0, graph_w, graph_h);
             }
         }
         if settings.show_scales {
@@ -1950,7 +2209,14 @@ const CRC_TABLE: [u32; 256] = {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use dso3d12_parser::Capture;
+    use dso_parser::Capture;
+
+    /// Helper to construct a test CaptureEntry from a Capture.
+    fn test_entry(capture: Capture) -> CaptureEntry {
+        let now = Local::now();
+        let record = dso_parser::capture_to_record(&capture, now, None);
+        CaptureEntry { capture, timestamp: now, record }
+    }
 
     #[test]
     fn stats_handles_empty() {
@@ -1985,13 +2251,10 @@ mod tests {
         let (mut app, _) = App::new();
         app.dump = Some(LoadedDump {
             path: PathBuf::from("test.bin"),
-            captures: vec![CaptureEntry {
-                capture: Capture {
-                    ch1: vec![1, 2, 3],
-                    ch2: None,
-                },
-                timestamp: Local::now(),
-            }],
+            captures: vec![test_entry(Capture {
+                ch1: vec![1, 2, 3],
+                ch2: None,
+            })],
         });
         let _ = app.update(Message::SelectCapture(99));
         assert_eq!(app.current, 0);
@@ -2025,13 +2288,10 @@ mod tests {
         let (mut app, _) = App::new();
         app.dump = Some(LoadedDump {
             path: PathBuf::from("test.bin"),
-            captures: vec![CaptureEntry {
-                capture: Capture {
-                    ch1: (0..100).map(|i| i as u8).collect(),
-                    ch2: None,
-                },
-                timestamp: Local::now(),
-            }],
+            captures: vec![test_entry(Capture {
+                ch1: (0..100).map(|i| i as u8).collect(),
+                ch2: None,
+            })],
         });
         let _ = app.view();
     }

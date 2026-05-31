@@ -16,6 +16,22 @@
 
 use thiserror::Error;
 
+pub mod screenshot;
+pub use screenshot::{
+    parse_screenshot, parse_screenshot_as, is_screenshot_packet,
+    DeviceVariant, ScreenshotPacket, OscSettings, ChannelSettings,
+    Measurements, PixelPoint,
+    format_uv, format_ps, format_hz, format_sample_rate,
+};
+
+pub mod container;
+pub use container::{
+    CaptureRecord, SourceFormat, ScopeState, ChannelState, ChannelMeasurements,
+    Waveform, serialize_zwcap, deserialize_zwcap, is_zwcap,
+    capture_to_record, screenshot_to_record, record_to_capture,
+    ZWCAP_MAGIC,
+};
+
 /// Default total buffer depth in samples that the DSO3D12 transmits per
 /// channel for a complete debug dump.
 pub const DEFAULT_BUFFER_DEPTH: usize = 60_000;
@@ -54,6 +70,9 @@ pub enum ParseError {
 
     #[error("malformed sample at byte offset {offset}: {reason}")]
     MalformedSample { offset: usize, reason: &'static str },
+
+    #[error("buffer too short: got {got} bytes, expected at least {expected}")]
+    TooShort { got: usize, expected: usize },
 }
 
 /// Parse every capture contained in `data`.
@@ -80,7 +99,12 @@ pub fn parse_captures(data: &[u8]) -> Result<Vec<Capture>, ParseError> {
         let ch2 = if data[ch1_end..].starts_with(CH2_MARKER) {
             let ch2_body = skip_marker_eol(data, ch1_end + CH2_MARKER.len());
             let ch2_end = find_next_boundary(data, ch2_body);
-            let samples = decode_ascii_samples(&data[ch2_body..ch2_end]);
+            // The device sends CH2 ADC values with inverted polarity in the ASCII
+            // dump (a hardware quirk). Flip here so Capture.ch2 uses the same
+            // visual-screen-coordinate convention as CH1 and screenshot data:
+            // low value = near top of screen = positive voltage.
+            let samples: Vec<u8> = decode_ascii_samples(&data[ch2_body..ch2_end])
+                .into_iter().map(|v| 255 - v).collect();
             next_cursor = ch2_end;
             Some(samples)
         } else {
@@ -340,7 +364,9 @@ mod tests {
         let dump = make_dump(&[10, 20, 30], Some(&[40, 50, 60]));
         let cap = parse_first(&dump).unwrap();
         assert_eq!(cap.ch1, vec![10, 20, 30]);
-        assert_eq!(cap.ch2.as_deref(), Some(&[40u8, 50, 60][..]));
+        // ASCII dump CH2 is inverted at parse time so it matches the
+        // screen-coordinate convention used by screenshot data (low value = top).
+        assert_eq!(cap.ch2.as_deref(), Some(&[215u8, 205, 195][..]));
     }
 
     #[test]
@@ -351,7 +377,8 @@ mod tests {
         assert_eq!(caps.len(), 2);
         assert_eq!(caps[0].ch1, vec![1, 2, 3]);
         assert_eq!(caps[1].ch1, vec![4, 5, 6]);
-        assert_eq!(caps[1].ch2.as_deref(), Some(&[7u8, 8][..]));
+        // CH2 is inverted at parse time: 255-7=248, 255-8=247
+        assert_eq!(caps[1].ch2.as_deref(), Some(&[248u8, 247][..]));
     }
 
     #[test]
