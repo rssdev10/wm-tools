@@ -1,0 +1,236 @@
+name: build and release
+
+on:
+  release:
+    types: [created]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    name: ${{ matrix.platform.label }}-${{ matrix.platform.arch }}
+    runs-on: ${{ matrix.platform.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        platform:
+          - label: linux
+            arch: x86_64
+            runner: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            cli_archive: wm-tools-cli-linux-x86_64.zip
+            gui_archive: dso3d12-gui-linux-x86_64.zip
+            gui_binary: dso3d12-gui
+            flash_binary: flash
+            capture_binary: capture
+          - label: windows
+            arch: x86_64
+            runner: windows-latest
+            target: x86_64-pc-windows-msvc
+            cli_archive: wm-tools-cli-windows-x86_64.zip
+            gui_archive: dso3d12-gui-windows-x86_64.zip
+            gui_binary: dso3d12-gui.exe
+            flash_binary: flash.exe
+            capture_binary: capture.exe
+          - label: macos
+            arch: x86_64
+            runner: macos-13
+            target: x86_64-apple-darwin
+            cli_archive: wm-tools-cli-macos-x86_64.zip
+            gui_archive: dso3d12-gui-macos-x86_64.zip
+            gui_binary: dso3d12-gui
+            flash_binary: flash
+            capture_binary: capture
+          - label: macos
+            arch: arm64
+            runner: macos-latest
+            target: aarch64-apple-darwin
+            cli_archive: wm-tools-cli-macos-arm64.zip
+            gui_archive: dso3d12-gui-macos-arm64.zip
+            gui_binary: dso3d12-gui
+            flash_binary: flash
+            capture_binary: capture
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.platform.target }}
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Install Linux dependencies
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update -y
+          sudo apt-get install -y \
+            libasound2-dev \
+            libfontconfig1-dev \
+            libfreetype6-dev \
+            libgl1-mesa-dev \
+            libudev-dev \
+            libwayland-dev \
+            libx11-dev \
+            libxcursor-dev \
+            libxi-dev \
+            libxinerama-dev \
+            libxkbcommon-dev \
+            libxrandr-dev \
+            pkg-config
+
+      - name: Build CLI (flasher + capture)
+        run: cargo build --locked --release -p wm-tools --target ${{ matrix.platform.target }}
+
+      - name: Build GUI
+        run: cargo build --locked --release -p dso3d12-gui --target ${{ matrix.platform.target }}
+
+      # --- CLI package ---
+
+      - name: Stage Linux CLI package
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -rf dist
+          mkdir -p dist/cli
+          cp "target/${{ matrix.platform.target }}/release/${{ matrix.platform.flash_binary }}" dist/cli/
+          cp "target/${{ matrix.platform.target }}/release/${{ matrix.platform.capture_binary }}" dist/cli/
+          cp LICENSE.txt README.md dist/cli/
+          cp packaging/common/README-cli.txt dist/cli/PACKAGE.txt
+          (cd dist && zip -r "${{ matrix.platform.cli_archive }}" cli)
+
+      - name: Stage macOS CLI package
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -rf dist
+          mkdir -p dist/cli
+          cp "target/${{ matrix.platform.target }}/release/${{ matrix.platform.flash_binary }}" dist/cli/
+          cp "target/${{ matrix.platform.target }}/release/${{ matrix.platform.capture_binary }}" dist/cli/
+          cp LICENSE.txt README.md dist/cli/
+          cp packaging/common/README-cli.txt dist/cli/PACKAGE.txt
+          ditto -c -k --keepParent dist/cli "dist/${{ matrix.platform.cli_archive }}"
+
+      - name: Stage Windows CLI package
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          Remove-Item -Recurse -Force dist -ErrorAction SilentlyContinue
+          New-Item -ItemType Directory -Path dist/cli | Out-Null
+          Copy-Item "target/${{ matrix.platform.target }}/release/${{ matrix.platform.flash_binary }}" dist/cli/
+          Copy-Item "target/${{ matrix.platform.target }}/release/${{ matrix.platform.capture_binary }}" dist/cli/
+          Copy-Item LICENSE.txt, README.md dist/cli/
+          Copy-Item packaging/common/README-cli.txt dist/cli/PACKAGE.txt
+          Compress-Archive -Path dist/cli/* -DestinationPath "dist/${{ matrix.platform.cli_archive }}" -Force
+
+      # --- GUI package ---
+
+      - name: Stage Linux GUI package
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p dist/gui
+          cp "target/${{ matrix.platform.target }}/release/${{ matrix.platform.gui_binary }}" dist/gui/
+          cp LICENSE.txt README.md dist/gui/
+          cp packaging/common/README-gui.txt dist/gui/PACKAGE.txt
+          cp packaging/linux/README.txt dist/gui/PLATFORM.txt
+          (cd dist && zip -r "${{ matrix.platform.gui_archive }}" gui)
+
+      - name: Stage Windows GUI package
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Path dist/gui -Force | Out-Null
+          Copy-Item "target/${{ matrix.platform.target }}/release/${{ matrix.platform.gui_binary }}" dist/gui/
+          Copy-Item LICENSE.txt, README.md dist/gui/
+          Copy-Item packaging/common/README-gui.txt dist/gui/PACKAGE.txt
+          Copy-Item packaging/windows/README.txt dist/gui/PLATFORM.txt
+          Compress-Archive -Path dist/gui/* -DestinationPath "dist/${{ matrix.platform.gui_archive }}" -Force
+
+      - name: Stage macOS GUI package
+        if: runner.os == 'macOS'
+        shell: bash
+        env:
+          APP_VERSION: ${{ github.event.release.tag_name || github.ref_name }}
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          ./packaging/macos/create_app_bundle.sh \
+            --dmg \
+            --output-dir dist \
+            --binary-path "target/${{ matrix.platform.target }}/release/dso3d12-gui" \
+            --version "${APP_VERSION:-0.0.0}"
+          cp packaging/common/README-gui.txt dist/README-gui.txt
+          cp packaging/macos/README-unsigned.txt dist/README-unsigned.txt
+          ditto -c -k --sequesterRsrc --keepParent dist/DSO3D12.app "dist/${{ matrix.platform.gui_archive }}"
+
+      # --- Checksums ---
+
+      - name: Generate checksums
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          set -euo pipefail
+          shasum -a 256 "dist/${{ matrix.platform.cli_archive }}" | awk '{print $1}' > "dist/${{ matrix.platform.cli_archive }}.sha256"
+          shasum -a 256 "dist/${{ matrix.platform.gui_archive }}" | awk '{print $1}' > "dist/${{ matrix.platform.gui_archive }}.sha256"
+          if [[ "${{ runner.os }}" == "macOS" ]]; then
+            shasum -a 256 dist/DSO3D12.dmg | awk '{print $1}' > dist/DSO3D12.dmg.sha256
+          fi
+
+      - name: Generate checksums (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          (Get-FileHash "dist/${{ matrix.platform.cli_archive }}" -Algorithm SHA256).Hash.ToLower() | Set-Content "dist/${{ matrix.platform.cli_archive }}.sha256"
+          (Get-FileHash "dist/${{ matrix.platform.gui_archive }}" -Algorithm SHA256).Hash.ToLower() | Set-Content "dist/${{ matrix.platform.gui_archive }}.sha256"
+
+      # --- Upload ---
+
+      - name: Release artifacts
+        if: github.event_name == 'release' && runner.os != 'macOS'
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist/${{ matrix.platform.cli_archive }}
+            dist/${{ matrix.platform.cli_archive }}.sha256
+            dist/${{ matrix.platform.gui_archive }}
+            dist/${{ matrix.platform.gui_archive }}.sha256
+
+      - name: Release macOS artifacts
+        if: github.event_name == 'release' && runner.os == 'macOS'
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist/${{ matrix.platform.cli_archive }}
+            dist/${{ matrix.platform.cli_archive }}.sha256
+            dist/${{ matrix.platform.gui_archive }}
+            dist/${{ matrix.platform.gui_archive }}.sha256
+            dist/DSO3D12.dmg
+            dist/DSO3D12.dmg.sha256
+            dist/README-unsigned.txt
+
+      - name: Upload artifacts (manual run)
+        if: github.event_name == 'workflow_dispatch'
+        uses: actions/upload-artifact@v4
+        with:
+          name: packages-${{ matrix.platform.label }}-${{ matrix.platform.arch }}
+          path: |
+            dist/${{ matrix.platform.cli_archive }}
+            dist/${{ matrix.platform.cli_archive }}.sha256
+            dist/${{ matrix.platform.gui_archive }}
+            dist/${{ matrix.platform.gui_archive }}.sha256
+            dist/DSO3D12.dmg
+            dist/DSO3D12.dmg.sha256
+            dist/README-unsigned.txt
+          if-no-files-found: ignore
+          retention-days: 7
