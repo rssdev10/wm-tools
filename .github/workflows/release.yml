@@ -183,12 +183,12 @@ jobs:
           set -euo pipefail
           shasum -a 256 "dist/${{ matrix.platform.cli_archive }}" | awk '{print $1}' > "dist/${{ matrix.platform.cli_archive }}.sha256"
           shasum -a 256 "dist/${{ matrix.platform.gui_archive }}" | awk '{print $1}' > "dist/${{ matrix.platform.gui_archive }}.sha256"
-          # Bundle CLI zip + sha256
-          cd dist && zip "${{ matrix.platform.cli_archive }}-bundle.zip" "${{ matrix.platform.cli_archive }}" "${{ matrix.platform.cli_archive }}.sha256"
-          # Bundle GUI zip + sha256
-          cd dist && zip "${{ matrix.platform.gui_archive }}-bundle.zip" "${{ matrix.platform.gui_archive }}" "${{ matrix.platform.gui_archive }}.sha256"
+          # Bundle CLI zip + sha256 into a single archive
+          (cd dist && zip "${{ matrix.platform.cli_archive }}-bundle.zip" "${{ matrix.platform.cli_archive }}" "${{ matrix.platform.cli_archive }}.sha256")
+          # Bundle GUI zip + sha256 into a single archive
+          (cd dist && zip "${{ matrix.platform.gui_archive }}-bundle.zip" "${{ matrix.platform.gui_archive }}" "${{ matrix.platform.gui_archive }}.sha256")
           if [[ "${{ runner.os }}" == "macOS" ]]; then
-            shasum -a 256 dist/DSO3D12.dmg | awk '{print $1}' > dist/DSO3D12.dmg.sha256
+            shasum -a 256 "dist/DSO3D12.dmg" | awk '{print $1}' > "dist/DSO3D12.dmg.sha256"
           fi
 
       - name: Generate checksums (Windows)
@@ -225,7 +225,7 @@ jobs:
 
       - name: Upload artifacts (manual run)
         if: github.event_name == 'workflow_dispatch'
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: packages-${{ matrix.platform.label }}-${{ matrix.platform.arch }}
           path: |
