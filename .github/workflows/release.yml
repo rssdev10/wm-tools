@@ -1,1 +1,11 @@
+name: build and release
 
+on:
+  workflow_dispatch:
+
+jobs:
+  placeholder:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Placeholder step
+        run: echo "Release workflow is a stub"
