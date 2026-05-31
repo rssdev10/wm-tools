@@ -1802,33 +1802,69 @@ async fn load_dump(path: PathBuf) -> Result<LoadedDump, anyhow::Error> {
 /// Play a short "start receiving" beep sound.
 fn play_beep_start() {
     #[cfg(target_os = "macos")]
-    {
-        std::thread::spawn(|| {
-            let _ = std::process::Command::new("afplay")
-                .arg("/System/Library/Sounds/Tink.aiff")
-                .output();
-        });
-    }
-    #[cfg(not(target_os = "macos"))]
-    {
-        print!("\x07");
-    }
+    std::thread::spawn(|| {
+        let _ = std::process::Command::new("afplay")
+            .arg("/System/Library/Sounds/Tink.aiff")
+            .output();
+    });
+
+    #[cfg(target_os = "linux")]
+    std::thread::spawn(|| {
+        // Try paplay (PulseAudio/PipeWire) with freedesktop sound theme.
+        let ok = std::process::Command::new("paplay")
+            .arg("/usr/share/sounds/freedesktop/stereo/bell.oga")
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false);
+        if !ok {
+            print!("\x07");
+        }
+    });
+
+    #[cfg(target_os = "windows")]
+    std::thread::spawn(|| {
+        // Asterisk is the standard Windows "notification" system sound.
+        let _ = std::process::Command::new("powershell")
+            .args(["-NoProfile", "-Command", "[System.Media.SystemSounds]::Asterisk.Play()"])
+            .output();
+    });
+
+    #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
+    print!("\x07");
 }
 
 /// Play a "capture complete" beep sound (different from start).
 fn play_beep_end() {
     #[cfg(target_os = "macos")]
-    {
-        std::thread::spawn(|| {
-            let _ = std::process::Command::new("afplay")
-                .arg("/System/Library/Sounds/Glass.aiff")
-                .output();
-        });
-    }
-    #[cfg(not(target_os = "macos"))]
-    {
-        print!("\x07");
-    }
+    std::thread::spawn(|| {
+        let _ = std::process::Command::new("afplay")
+            .arg("/System/Library/Sounds/Glass.aiff")
+            .output();
+    });
+
+    #[cfg(target_os = "linux")]
+    std::thread::spawn(|| {
+        // "complete" is the standard task-done sound in the freedesktop theme.
+        let ok = std::process::Command::new("paplay")
+            .arg("/usr/share/sounds/freedesktop/stereo/complete.oga")
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false);
+        if !ok {
+            print!("\x07");
+        }
+    });
+
+    #[cfg(target_os = "windows")]
+    std::thread::spawn(|| {
+        // Exclamation is the standard Windows "action complete" system sound.
+        let _ = std::process::Command::new("powershell")
+            .args(["-NoProfile", "-Command", "[System.Media.SystemSounds]::Exclamation.Play()"])
+            .output();
+    });
+
+    #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
+    print!("\x07");
 }
 
 // ── File save/load helpers ─────────────────────────────────────────────────
