@@ -2,7 +2,7 @@ name: build and release
 
 on:
   release:
-    types: [created]
+    types: [created, published]
   workflow_dispatch:
 
 permissions:
@@ -39,7 +39,7 @@ jobs:
             capture_binary: capture.exe
           - label: macos
             arch: x86_64
-            runner: macos-13
+            runner: macos-latest
             target: x86_64-apple-darwin
             cli_archive: wm-tools-cli-macos-x86_64.zip
             gui_archive: dso3d12-gui-macos-x86_64.zip
@@ -57,7 +57,7 @@ jobs:
             capture_binary: capture
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       - uses: dtolnay/rust-toolchain@stable
         with:
@@ -183,6 +183,10 @@ jobs:
           set -euo pipefail
           shasum -a 256 "dist/${{ matrix.platform.cli_archive }}" | awk '{print $1}' > "dist/${{ matrix.platform.cli_archive }}.sha256"
           shasum -a 256 "dist/${{ matrix.platform.gui_archive }}" | awk '{print $1}' > "dist/${{ matrix.platform.gui_archive }}.sha256"
+          # Bundle CLI zip + sha256
+          cd dist && zip "${{ matrix.platform.cli_archive }}-bundle.zip" "${{ matrix.platform.cli_archive }}" "${{ matrix.platform.cli_archive }}.sha256"
+          # Bundle GUI zip + sha256
+          cd dist && zip "${{ matrix.platform.gui_archive }}-bundle.zip" "${{ matrix.platform.gui_archive }}" "${{ matrix.platform.gui_archive }}.sha256"
           if [[ "${{ runner.os }}" == "macOS" ]]; then
             shasum -a 256 dist/DSO3D12.dmg | awk '{print $1}' > dist/DSO3D12.dmg.sha256
           fi
@@ -193,6 +197,10 @@ jobs:
         run: |
           (Get-FileHash "dist/${{ matrix.platform.cli_archive }}" -Algorithm SHA256).Hash.ToLower() | Set-Content "dist/${{ matrix.platform.cli_archive }}.sha256"
           (Get-FileHash "dist/${{ matrix.platform.gui_archive }}" -Algorithm SHA256).Hash.ToLower() | Set-Content "dist/${{ matrix.platform.gui_archive }}.sha256"
+          # Bundle CLI zip + sha256
+          Compress-Archive -Path "dist/${{ matrix.platform.cli_archive }}","dist/${{ matrix.platform.cli_archive }}.sha256" -DestinationPath "dist/${{ matrix.platform.cli_archive }}-bundle.zip" -Force
+          # Bundle GUI zip + sha256
+          Compress-Archive -Path "dist/${{ matrix.platform.gui_archive }}","dist/${{ matrix.platform.gui_archive }}.sha256" -DestinationPath "dist/${{ matrix.platform.gui_archive }}-bundle.zip" -Force
 
       # --- Upload ---
 
@@ -201,20 +209,16 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           files: |
-            dist/${{ matrix.platform.cli_archive }}
-            dist/${{ matrix.platform.cli_archive }}.sha256
-            dist/${{ matrix.platform.gui_archive }}
-            dist/${{ matrix.platform.gui_archive }}.sha256
+            dist/${{ matrix.platform.cli_archive }}-bundle.zip
+            dist/${{ matrix.platform.gui_archive }}-bundle.zip
 
       - name: Release macOS artifacts
         if: github.event_name == 'release' && runner.os == 'macOS'
         uses: softprops/action-gh-release@v2
         with:
           files: |
-            dist/${{ matrix.platform.cli_archive }}
-            dist/${{ matrix.platform.cli_archive }}.sha256
-            dist/${{ matrix.platform.gui_archive }}
-            dist/${{ matrix.platform.gui_archive }}.sha256
+            dist/${{ matrix.platform.cli_archive }}-bundle.zip
+            dist/${{ matrix.platform.gui_archive }}-bundle.zip
             dist/DSO3D12.dmg
             dist/DSO3D12.dmg.sha256
             dist/README-unsigned.txt
