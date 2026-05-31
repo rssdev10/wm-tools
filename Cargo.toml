@@ -1,19 +1,19 @@
-[package]
-name = "wm-tools"
-version = "0.1.2"
+[workspace]
+resolver = "2"
+members = [
+    "flasher",
+    "dso3d12-parser",
+    "gui",
+]
+
+[workspace.package]
+version = "0.2.0"
 edition = "2021"
-description = "A tool for Winner Micro MCU (including DSO 3D12 oscilloscope firmware)"
+description = "Tools for ZeeWeii DSO3D12 oscilloscope and Winner Micro MCUs"
+license = "MIT"
 repository = "https://github.com/rssdev10/wm-tools"
 
-[[bin]]
-name = "flash"
-path = "src/flash.rs"
-
-[dependencies]
+[workspace.dependencies]
 anyhow = "1.0"
-clap = { version = "4.0", features = ["derive"] }
-colored = "3.0"
-crc = "3.0"
-indicatif = "0.18"
-serialport = "4.9.0"
-tabled = "0.20"
+thiserror = "2.0"
+log = "0.4"
