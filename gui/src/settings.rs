@@ -40,6 +40,9 @@ pub struct Settings {
     /// Voltage offset (zero-level of graph) in volts. Default 0.0 V.
     #[serde(default)]
     pub v_offset: f64,
+    /// Last window size (width, height) in logical pixels.
+    #[serde(default = "default_window_size")]
+    pub window_size: (f32, f32),
 }
 
 fn default_v_per_div() -> f64 {
@@ -48,6 +51,10 @@ fn default_v_per_div() -> f64 {
 
 fn default_t_per_div_ms() -> f64 {
     1.0
+}
+
+fn default_window_size() -> (f32, f32) {
+    (800.0, 600.0)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -93,6 +100,7 @@ impl Default for Settings {
             v_per_div: 1.0,
             t_per_div_ms: 1.0,
             v_offset: 0.0,
+            window_size: default_window_size(),
         }
     }
 }

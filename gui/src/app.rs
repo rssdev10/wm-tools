@@ -76,10 +76,14 @@ pub enum Message {
     FirmwareEvent(#[allow(dead_code)] crate::flash::FlashEvent),
     // Port scan tick (auto-refresh)
     PortScanTick,
+    // Window resized
+    WindowResized(f32, f32),
     // Open a URL in the default browser
     OpenUrl(String),
     // Context menu on thumbnails (right-click via iced_aw::ContextMenu)
     ContextMenuDeleteAt(usize),
+    UndoDelete,
+    UndoExpiredTick,
     ContextMenuExportPngAt(usize),
     ContextMenuExportPngPicked(Option<PathBuf>),
     ContextMenuExportCsvAt(usize),
@@ -135,6 +139,10 @@ pub struct App {
     was_listening_before_flash: bool,
     /// Target capture index for context menu export operations.
     context_export_idx: Option<usize>,
+    /// Last deleted capture, available for undo (index it was at, entry).
+    deleted_capture: Option<(usize, CaptureEntry)>,
+    /// Timestamp of the last deletion, for 30-second undo expiry.
+    deleted_at: Option<std::time::Instant>,
     /// Text input state for V/div scale.
     v_per_div_input: String,
     /// Text input state for t/div scale.
@@ -181,6 +189,8 @@ impl App {
                 firmware_confirming: false,
                 was_listening_before_flash: false,
                 context_export_idx: None,
+                deleted_capture: None,
+                deleted_at: None,
                 v_per_div_input: v_per_div_str,
                 t_per_div_input: t_per_div_str,
                 v_offset_input: v_offset_str,
@@ -251,11 +261,25 @@ impl App {
                 .map(|_| Message::PortScanTick),
         );
 
+        // Track window resize to persist size
+        subs.push(
+            iced::window::resize_events()
+                .map(|(_id, size)| Message::WindowResized(size.width, size.height)),
+        );
+
         // Poll firmware events
         if self.firmware_rx.is_some() {
             subs.push(
                 iced::time::every(std::time::Duration::from_millis(100))
                     .map(|_| Message::FirmwareEvent(crate::flash::FlashEvent::Status(String::new()))),
+            );
+        }
+
+        // Expire undo buffer after 30 seconds
+        if self.deleted_capture.is_some() {
+            subs.push(
+                iced::time::every(std::time::Duration::from_secs(1))
+                    .map(|_| Message::UndoExpiredTick),
             );
         }
 
@@ -272,6 +296,8 @@ impl App {
                 Message::Loaded(r.map_err(|e| e.to_string()))
             }),
             Message::Loaded(Ok(d)) => {
+                self.deleted_capture = None;
+                self.deleted_at = None;
                 self.status = format!(
                     "Loaded {} capture{} from {}",
                     d.captures.len(),
@@ -445,6 +471,8 @@ impl App {
                                     self.current = 0;
                                 }
                                 self.capture_progress = 0;
+                                self.deleted_capture = None;
+                                self.deleted_at = None;
                                 self.status = format!(
                                     "Received {count} capture(s). Total: {}",
                                     self.dump.as_ref().map(|d| d.captures.len()).unwrap_or(0)
@@ -484,6 +512,8 @@ impl App {
                                             self.current = 0;
                                         }
                                         self.capture_progress = 0;
+                                        self.deleted_capture = None;
+                                        self.deleted_at = None;
                                         self.status = format!(
                                             "Screenshot received ({}/div, {}/div). Total: {}",
                                             dso_parser::format_uv(
@@ -673,6 +703,11 @@ impl App {
                 }
                 Task::none()
             }
+            Message::WindowResized(w, h) => {
+                self.settings.window_size = (w, h);
+                self.settings.save();
+                Task::none()
+            }
             Message::OpenUrl(url) => {
                 let _ = open::that(url);
                 Task::none()
@@ -680,11 +715,40 @@ impl App {
             Message::ContextMenuDeleteAt(idx) => {
                 if let Some(ref mut dump) = self.dump {
                     if idx < dump.captures.len() {
-                        dump.captures.remove(idx);
+                        let entry = dump.captures.remove(idx);
+                        self.deleted_capture = Some((idx, entry));
+                        self.deleted_at = Some(std::time::Instant::now());
                         if self.current >= dump.captures.len() && self.current > 0 {
                             self.current -= 1;
                         }
-                        self.status = format!("Deleted capture #{}", idx + 1);
+                        self.status = format!("Deleted capture #{}. Press Undo to restore.", idx + 1);
+                    }
+                }
+                Task::none()
+            }
+            Message::UndoDelete => {
+                self.deleted_at = None;
+                if let Some((idx, entry)) = self.deleted_capture.take() {
+                    let dump = self.dump.get_or_insert_with(|| LoadedDump {
+                        path: PathBuf::from("<serial>"),
+                        captures: vec![],
+                    });
+                    let insert_at = idx.min(dump.captures.len());
+                    dump.captures.insert(insert_at, entry);
+                    self.current = insert_at;
+                    self.status = format!("Restored capture #{}.", insert_at + 1);
+                }
+                Task::none()
+            }
+            Message::UndoExpiredTick => {
+                if let Some(at) = self.deleted_at {
+                    if at.elapsed().as_secs() >= 30 {
+                        self.deleted_capture = None;
+                        self.deleted_at = None;
+                        // Clear the status hint only if it still mentions undo
+                        if self.status.contains("Undo") {
+                            self.status = "Undo expired.".to_string();
+                        }
                     }
                 }
                 Task::none()
@@ -878,7 +942,7 @@ impl App {
             .height(Length::FillPortion(1))
             .into();
         let controls = self.controls_panel();
-        let thumbs = thumbnails(&self.dump, self.current);
+        let thumbs = thumbnails(&self.dump, self.current, self.deleted_capture.is_some());
         let actions = self.action_buttons();
 
         let instructions: Element<'_, Message> = if self.settings.show_instructions {
@@ -1117,8 +1181,7 @@ impl App {
         .placeholder("Port…")
         .text_size(12);
 
-        container(
-            row![
+        let status_row = row![
                 text("DSO3D12").size(14),
                 Space::new().width(Length::Fixed(12.0)),
                 port_picker,
@@ -1128,8 +1191,9 @@ impl App {
                 text(self.status.clone()).size(12),
             ]
             .spacing(6)
-            .align_y(iced::Alignment::Center),
-        )
+            .align_y(iced::Alignment::Center);
+
+        container(status_row)
         .padding(4)
         .width(Length::Fill)
         .style(container::rounded_box)
@@ -1641,13 +1705,25 @@ fn samples_to_time_ms(n: usize) -> f64 {
 
 /// Thumbnails strip: scrollable row of mini waveform canvases.
 /// Each thumbnail shows the signal shape and is clickable.
-fn thumbnails<'a>(dump: &'a Option<LoadedDump>, current: usize) -> Element<'a, Message> {
-    let Some(dump) = dump else {
-        return Space::new().height(Length::Fixed(0.0)).into();
-    };
-    if dump.captures.is_empty() {
+fn thumbnails<'a>(dump: &'a Option<LoadedDump>, current: usize, can_undo: bool) -> Element<'a, Message> {
+    let is_empty = dump.as_ref().map_or(true, |d| d.captures.is_empty());
+    if is_empty {
+        if can_undo {
+            return container(
+                button(text("Undo Delete").size(12))
+                    .on_press(Message::UndoDelete)
+                    .style(button::secondary),
+            )
+            .height(Length::Fixed(62.0))
+            .width(Length::Fill)
+            .align_x(iced::Alignment::Start)
+            .align_y(iced::Alignment::Center)
+            .padding(4)
+            .into();
+        }
         return Space::new().height(Length::Fixed(0.0)).into();
     }
+    let dump = dump.as_ref().unwrap();
     let row_items = dump.captures.iter().enumerate().map(|(i, entry)| {
         let thumb = Thumbnail {
             capture: &entry.capture,
@@ -1672,27 +1748,48 @@ fn thumbnails<'a>(dump: &'a Option<LoadedDump>, current: usize) -> Element<'a, M
         let tooltip_ts = entry.timestamp.format("%Y-%m-%d %H:%M:%S").to_string();
         let underlay: Element<'a, Message> = iced::widget::tooltip(
             btn,
-            text(tooltip_ts).size(11),
+            text(tooltip_ts.clone()).size(11),
             iced::widget::tooltip::Position::Top,
         )
         .into();
 
         let ctx_idx = i;
+        let menu_ts = tooltip_ts.clone();
         iced_aw::ContextMenu::new(underlay, move || {
-            iced::widget::column![
-                button(text("Export PNG…").size(12))
-                    .on_press(Message::ContextMenuExportPngAt(ctx_idx))
-                    .width(Length::Fill),
-                button(text("Export CSV…").size(12))
-                    .on_press(Message::ContextMenuExportCsvAt(ctx_idx))
-                    .width(Length::Fill),
-                button(text("Delete").size(12))
-                    .on_press(Message::ContextMenuDeleteAt(ctx_idx))
-                    .width(Length::Fill),
-            ]
-            .spacing(2)
-            .padding(4)
-            .width(Length::Fixed(140.0))
+            container(
+                iced::widget::column![
+                    text(menu_ts.clone()).size(10),
+                    rule::horizontal(1),
+                    button(text("Export PNG…").size(12))
+                        .on_press(Message::ContextMenuExportPngAt(ctx_idx))
+                        .width(Length::Fill)
+                        .style(button::text),
+                    button(text("Export CSV…").size(12))
+                        .on_press(Message::ContextMenuExportCsvAt(ctx_idx))
+                        .width(Length::Fill)
+                        .style(button::text),
+                    rule::horizontal(1),
+                    button(text("Delete").size(12))
+                        .on_press(Message::ContextMenuDeleteAt(ctx_idx))
+                        .width(Length::Fill)
+                        .style(button::danger),
+                    rule::horizontal(1),
+                    {
+                        let undo_btn = button(text("Undo Delete").size(12))
+                            .width(Length::Fill)
+                            .style(button::text);
+                        if can_undo {
+                            undo_btn.on_press(Message::UndoDelete)
+                        } else {
+                            undo_btn
+                        }
+                    },
+                ]
+                .spacing(1)
+                .padding(4)
+                .width(Length::Fixed(160.0)),
+            )
+            .style(container::bordered_box)
             .into()
         })
         .into()

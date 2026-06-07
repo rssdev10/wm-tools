@@ -19,12 +19,16 @@ fn main() -> iced::Result {
     )
     .ok();
 
+    let settings = crate::settings::Settings::load();
+    let (w, h) = settings.window_size;
+
     iced::application(App::new, App::update, App::view)
         .title(App::title)
         .theme(App::theme)
         .subscription(App::subscription)
         .window(window::Settings {
             icon,
+            size: iced::Size::new(w, h),
             ..Default::default()
         })
         .run()
