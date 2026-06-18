@@ -64,16 +64,16 @@ yellow CH1, cyan CH2. Renders:
 ### 3. Measurement panel (right, 220 px)
 Vertical column inside a rounded container.
 
-**Scale configuration** (always visible):
-* **V/div** text input — volts per division (default 1.0 V). With "V" unit.
-* **t/div** text input — time per division in ms (default 1.0 ms). With "ms" unit.
-* **V/off** text input — voltage offset at graph center (default 0.0 V). With "V" unit.
+**Scale configuration** (always visible, two-column layout with CH1/CH2 headers):
+* **V/div** text inputs — volts per division per channel (default 1.0 V each). With "V" unit.
+* **V/off** text inputs — voltage offset at graph center per channel (default 0.0 V each). With "V" unit.
+* **t/div** text input — time per division in ms (shared, default 1.0 ms). With "ms" unit. 
 * Label: "AC mode: 8×V, 12×t divs" — documents the scope grid geometry.
 
 These values drive all voltage/time calculations throughout the panel and
 graph scales. The oscilloscope screen has 8 vertical and 12 horizontal divs.
-When a capture arrives via the screenshot protocol, V/div, t/div, and V/offset
-are **automatically filled** from the packet metadata.
+When a capture arrives via the screenshot protocol, V/div and V/offset are
+**automatically filled** from CH1/CH2 packet metadata separately.
 
 **Signal information** (shown when a capture is loaded):
 * Voltage range for CH1/CH2 (computed from V/div × 8 divs, centered at 0).
@@ -85,7 +85,8 @@ user drags whichever knob is nearer.
 
 Below each slider the panel shows cursor measurements:
 * X cursors → Δt in ms + frequency in Hz (using real t/div scale).
-* Y cursors → ΔV in volts + absolute voltage pair (using real V/div scale).
+* Y cursors → ΔV in volts + absolute voltage pair per channel (using each
+  channel's V/div and V/offset scale independently).
 
 A divider, then per-channel basic stats (`n`, `min`, `max`, `avg`).
 
@@ -198,6 +199,8 @@ external image crate needed). Filename is auto-generated as
   "view_mode": "Line",
   "cursor_x_range": [0.3, 0.7],
   "cursor_y_range": [0.3, 0.7],
+  "v_per_div_ch1": 1.0, "v_per_div_ch2": 1.0,
+  "v_offset_ch1": 0.0, "v_offset_ch2": 0.0,
   "show_scales": false,
   "alert_on_data": true,
   "auto_listen": false,
@@ -217,7 +220,9 @@ Default level: info; override with `RUST_LOG`.
 
 ## Voltage & time assumptions
 
-* ADC 0..255 mapped to ±5 V (0 = −5 V, 128 = 0 V, 255 ≈ +5 V) for raw debug dumps.
+* ADC 0..255 uses screen-coordinate convention (0 = top of screen ≈ +5 V,
+  127/128 = 0 V, 255 = bottom of screen ≈ −5 V). This is consistent across
+  both debug-dump and screenshot data paths.
 * Scale labels are derived from V/div and V/offset settings:
   - Top of graph = V/offset + 4×V/div
   - Bottom of graph = V/offset − 4×V/div

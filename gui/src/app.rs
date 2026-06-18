@@ -50,9 +50,11 @@ pub enum Message {
     MeasCursorXChanged(f32, f32),
     MeasCursorYChanged(f32, f32),
     // Scale inputs (V/div, time/div, V offset)
-    VPerCellChanged(String),
+    VPerCellChangedCh1(String),
+    VPerCellChangedCh2(String),
     TPerCellChanged(String),
-    VOffsetChanged(String),
+    VOffsetChangedCh1(String),
+    VOffsetChangedCh2(String),
     // Graph click — move nearest cursor
     GraphClicked(f32, f32),
     // Misc
@@ -143,12 +145,16 @@ pub struct App {
     deleted_capture: Option<(usize, CaptureEntry)>,
     /// Timestamp of the last deletion, for 30-second undo expiry.
     deleted_at: Option<std::time::Instant>,
-    /// Text input state for V/div scale.
-    v_per_div_input: String,
+    /// Text input state for V/div scale (CH1).
+    v_per_div_ch1_input: String,
+    /// Text input state for V/div scale (CH2).
+    v_per_div_ch2_input: String,
     /// Text input state for t/div scale.
     t_per_div_input: String,
-    /// Text input state for V/offset.
-    v_offset_input: String,
+    /// Text input state for V/offset (CH1).
+    v_offset_ch1_input: String,
+    /// Text input state for V/offset (CH2).
+    v_offset_ch2_input: String,
 }
 
 impl App {
@@ -162,9 +168,11 @@ impl App {
         );
         let baud_str = settings.baud_rate.to_string();
         let port_str = settings.serial_port.clone().unwrap_or_default();
-        let v_per_div_str = format_float(settings.v_per_div);
+        let v_per_div_ch1_str = format_float(settings.v_per_div_ch1);
+        let v_per_div_ch2_str = format_float(settings.v_per_div_ch2);
         let t_per_div_str = format_float(settings.t_per_div_ms);
-        let v_offset_str = format_float(settings.v_offset);
+        let v_offset_ch1_str = format_float(settings.v_offset_ch1);
+        let v_offset_ch2_str = format_float(settings.v_offset_ch2);
         (
             Self {
                 settings,
@@ -191,9 +199,11 @@ impl App {
                 context_export_idx: None,
                 deleted_capture: None,
                 deleted_at: None,
-                v_per_div_input: v_per_div_str,
+                v_per_div_ch1_input: v_per_div_ch1_str,
+                v_per_div_ch2_input: v_per_div_ch2_str,
                 t_per_div_input: t_per_div_str,
-                v_offset_input: v_offset_str,
+                v_offset_ch1_input: v_offset_ch1_str,
+                v_offset_ch2_input: v_offset_ch2_str,
             },
             Task::none(),
         )
@@ -491,12 +501,17 @@ impl App {
                                         // Auto-fill scale from screenshot metadata
                                         let s = &pkt.settings;
                                         let probe1 = 10f64.powi(s.ch1.probe_mode as i32);
-                                        self.settings.v_per_div = s.ch1.volt_scale_uv as f64 / 1_000_000.0 * probe1;
+                                        let probe2 = 10f64.powi(s.ch2.probe_mode as i32);
+                                        self.settings.v_per_div_ch1 = s.ch1.volt_scale_uv as f64 / 1_000_000.0 * probe1;
+                                        self.settings.v_per_div_ch2 = s.ch2.volt_scale_uv as f64 / 1_000_000.0 * probe2;
                                         self.settings.t_per_div_ms = s.timebase_ns_per_div as f64 / 1_000_000.0;
-                                        self.settings.v_offset = s.ch1.zero_volt_uv as f64 / 1_000_000.0 * probe1;
-                                        self.v_per_div_input = format_float(self.settings.v_per_div);
+                                        self.settings.v_offset_ch1 = s.ch1.zero_volt_uv as f64 / 1_000_000.0 * probe1;
+                                        self.settings.v_offset_ch2 = s.ch2.zero_volt_uv as f64 / 1_000_000.0 * probe2;
+                                        self.v_per_div_ch1_input = format_float(self.settings.v_per_div_ch1);
+                                        self.v_per_div_ch2_input = format_float(self.settings.v_per_div_ch2);
                                         self.t_per_div_input = format_float(self.settings.t_per_div_ms);
-                                        self.v_offset_input = format_float(self.settings.v_offset);
+                                        self.v_offset_ch1_input = format_float(self.settings.v_offset_ch1);
+                                        self.v_offset_ch2_input = format_float(self.settings.v_offset_ch2);
                                         self.settings.save();
 
                                         let entry = CaptureEntry { capture, timestamp: now, record };
@@ -515,9 +530,12 @@ impl App {
                                         self.deleted_capture = None;
                                         self.deleted_at = None;
                                         self.status = format!(
-                                            "Screenshot received ({}/div, {}/div). Total: {}",
+                                            "Screenshot received (CH1: {}/div, CH2: {}/div, {}/div). Total: {}",
                                             dso_parser::format_uv(
-                                                (self.settings.v_per_div * 1_000_000.0) as i64, 0
+                                                (self.settings.v_per_div_ch1 * 1_000_000.0) as i64, 0
+                                            ),
+                                            dso_parser::format_uv(
+                                                (self.settings.v_per_div_ch2 * 1_000_000.0) as i64, 0
                                             ),
                                             s.timebase_label(),
                                             self.dump.as_ref().map(|d| d.captures.len()).unwrap_or(0)
@@ -581,12 +599,21 @@ impl App {
                 self.settings.cursor_y_range = (lo, hi);
                 Task::none()
             }
-            Message::VPerCellChanged(s) => {
-                self.v_per_div_input = s.clone();
-                // Accept both decimal ("0.001") and scientific notation ("1e-3")
+            Message::VPerCellChangedCh1(s) => {
+                self.v_per_div_ch1_input = s.clone();
                 if let Ok(v) = s.parse::<f64>() {
                     if v > 0.0 && v.is_finite() {
-                        self.settings.v_per_div = v;
+                        self.settings.v_per_div_ch1 = v;
+                        self.settings.save();
+                    }
+                }
+                Task::none()
+            }
+            Message::VPerCellChangedCh2(s) => {
+                self.v_per_div_ch2_input = s.clone();
+                if let Ok(v) = s.parse::<f64>() {
+                    if v > 0.0 && v.is_finite() {
+                        self.settings.v_per_div_ch2 = v;
                         self.settings.save();
                     }
                 }
@@ -602,11 +629,21 @@ impl App {
                 }
                 Task::none()
             }
-            Message::VOffsetChanged(s) => {
-                self.v_offset_input = s.clone();
+            Message::VOffsetChangedCh1(s) => {
+                self.v_offset_ch1_input = s.clone();
                 if let Ok(v) = s.parse::<f64>() {
                     if v.is_finite() {
-                        self.settings.v_offset = v;
+                        self.settings.v_offset_ch1 = v;
+                        self.settings.save();
+                    }
+                }
+                Task::none()
+            }
+            Message::VOffsetChangedCh2(s) => {
+                self.v_offset_ch2_input = s.clone();
+                if let Ok(v) = s.parse::<f64>() {
+                    if v.is_finite() {
+                        self.settings.v_offset_ch2 = v;
                         self.settings.save();
                     }
                 }
@@ -1244,9 +1281,11 @@ impl App {
             } else {
                 None
             },
-            v_per_div: self.settings.v_per_div,
+            v_per_div_ch1: self.settings.v_per_div_ch1,
+            v_per_div_ch2: self.settings.v_per_div_ch2,
             t_per_div_ms: self.settings.t_per_div_ms,
-            v_offset: self.settings.v_offset,
+            v_offset_ch1: self.settings.v_offset_ch1,
+            v_offset_ch2: self.settings.v_offset_ch2,
             on_click: Some(Message::GraphClicked),
         };
         canvas(scope)
@@ -1263,84 +1302,20 @@ impl App {
         let (xlo, xhi) = self.settings.cursor_x_range;
         let (ylo, yhi) = self.settings.cursor_y_range;
 
-        // Scale parameters
-        let v_per_div = self.settings.v_per_div;
+        // Scale parameters (per-channel)
+        let v_per_div_ch1 = self.settings.v_per_div_ch1;
+        let v_per_div_ch2 = self.settings.v_per_div_ch2;
         let t_per_div_ms = self.settings.t_per_div_ms;
-        let v_offset = self.settings.v_offset;
-        let half_v_range = 4.0 * v_per_div; // 8 div / 2
+        let v_offset_ch1 = self.settings.v_offset_ch1;
+        let v_offset_ch2 = self.settings.v_offset_ch2;
+        let half_v_range_ch1 = 4.0 * v_per_div_ch1; // 8 div / 2
+        let half_v_range_ch2 = 4.0 * v_per_div_ch2;
         let total_time_ms = 12.0 * t_per_div_ms;
 
-        // ── Signal information ──
         let mut items: Vec<Element<'_, Message>> = vec![
             text("Measurement").size(13).into(),
             rule::horizontal(1).into(),
         ];
-
-        // ── Scale inputs ──
-        items.push(
-            row![
-                text("V/div:").size(11),
-                text_input("1.0", &self.v_per_div_input)
-                    .on_input(Message::VPerCellChanged)
-                    .size(11)
-                    .width(Length::Fixed(50.0)),
-                text("V").size(11),
-            ]
-            .spacing(4)
-            .align_y(iced::Alignment::Center)
-            .into(),
-        );
-        items.push(
-            row![
-                text("t/div:").size(11),
-                text_input("1.0", &self.t_per_div_input)
-                    .on_input(Message::TPerCellChanged)
-                    .size(11)
-                    .width(Length::Fixed(50.0)),
-                text("ms").size(11),
-            ]
-            .spacing(4)
-            .align_y(iced::Alignment::Center)
-            .into(),
-        );
-        items.push(
-            row![
-                text("V/off:").size(11),
-                text_input("0.0", &self.v_offset_input)
-                    .on_input(Message::VOffsetChanged)
-                    .size(11)
-                    .width(Length::Fixed(50.0)),
-                text("V").size(11),
-            ]
-            .spacing(4)
-            .align_y(iced::Alignment::Center)
-            .into(),
-        );
-        items.push(
-            text("AC mode: 8×V, 12×t div").size(9).into(),
-        );
-        items.push(rule::horizontal(1).into());
-
-        if let Some(cap) = cap {
-            let v_min = frac_to_voltage(1.0, half_v_range, v_offset); // bottom
-            let v_max = frac_to_voltage(0.0, half_v_range, v_offset); // top
-            items.push(
-                text(format!("CH1 range: {v_min:.2}V … {v_max:.2}V")).size(11).into(),
-            );
-            items.push(
-                text(format!("Time range: {total_time_ms:.2} ms ({} samp)", cap.ch1.len()))
-                    .size(11)
-                    .into(),
-            );
-            if cap.ch2.is_some() {
-                items.push(
-                    text(format!("CH2 range: {v_min:.2}V … {v_max:.2}V"))
-                        .size(11)
-                        .into(),
-                );
-            }
-            items.push(rule::horizontal(1).into());
-        }
 
         // ── X cursor (time) ──
         items.push(
@@ -1382,21 +1357,112 @@ impl App {
 
         if self.settings.measurement_cursor_y_enabled {
             items.push(range_slider::horizontal(ylo, yhi, Message::MeasCursorYChanged));
-            let v_lo = frac_to_voltage(ylo as f64, half_v_range, v_offset);
-            let v_hi = frac_to_voltage(yhi as f64, half_v_range, v_offset);
-            let dv = (v_hi - v_lo).abs();
+            let v_ch1_lo = frac_to_voltage(ylo as f64, half_v_range_ch1, v_offset_ch1);
+            let v_ch1_hi = frac_to_voltage(yhi as f64, half_v_range_ch1, v_offset_ch1);
+            let v_ch2_lo = frac_to_voltage(ylo as f64, half_v_range_ch2, v_offset_ch2);
+            let v_ch2_hi = frac_to_voltage(yhi as f64, half_v_range_ch2, v_offset_ch2);
+            let dv_ch1 = (v_ch1_hi - v_ch1_lo).abs();
+            let dv_ch2 = (v_ch2_hi - v_ch2_lo).abs();
             items.push(
                 column![
-                    text(format!("ΔV = {dv:.3} V")).size(11),
-                    text(format!("({v_lo:.2}V … {v_hi:.2}V)")).size(11),
+                    text(format!("CH1 ΔV = {dv_ch1:.3} V")).size(11),
+                    text(format!("  ({v_ch1_lo:.2}V … {v_ch1_hi:.2}V)")).size(10),
+                    text(format!("CH2 ΔV = {dv_ch2:.3} V")).size(11),
+                    text(format!("  ({v_ch2_lo:.2}V … {v_ch2_hi:.2}V)")).size(10),
                 ]
-                .spacing(2)
+                .spacing(0)
                 .into(),
             );
         }
 
         items.push(Space::new().height(Length::Fixed(6.0)).into());
         items.push(rule::horizontal(1).into());
+
+        // ── Scale inputs (two-column layout: CH1 | CH2) ──
+        let col_w = Length::Fixed(85.0);
+        let input_w = Length::Fixed(42.0);
+        items.push(
+            row![
+                text("").size(11).width(col_w),
+                text("CH1").size(11).width(input_w),
+                text("CH2").size(11).width(input_w),
+            ]
+            .spacing(2)
+            .into(),
+        );
+        // V/div row
+        items.push(
+            row![
+                text("V/div, V:").size(11).width(col_w),
+                text_input("1.0", &self.v_per_div_ch1_input)
+                    .on_input(Message::VPerCellChangedCh1)
+                    .size(11)
+                    .width(input_w),
+                text_input("1.0", &self.v_per_div_ch2_input)
+                    .on_input(Message::VPerCellChangedCh2)
+                    .size(11)
+                    .width(input_w),
+            ]
+            .spacing(2)
+            .align_y(iced::Alignment::Center)
+            .into(),
+        );
+        // V/off row
+        items.push(
+            row![
+                text("V/off, V:").size(11).width(col_w),
+                text_input("0.0", &self.v_offset_ch1_input)
+                    .on_input(Message::VOffsetChangedCh1)
+                    .size(11)
+                    .width(input_w),
+                text_input("0.0", &self.v_offset_ch2_input)
+                    .on_input(Message::VOffsetChangedCh2)
+                    .size(11)
+                    .width(input_w),
+            ]
+            .spacing(2)
+            .align_y(iced::Alignment::Center)
+            .into(),
+        );
+        // t/div row (shared, spans both channels)
+        items.push(
+            row![
+                text("t/div, ms:").size(11).width(col_w),
+                text_input("1.0", &self.t_per_div_input)
+                    .on_input(Message::TPerCellChanged)
+                    .size(11)
+                    .width(Length::Fixed(90.0))
+            ]
+            .spacing(2)
+            .align_y(iced::Alignment::Center)
+            .into(),
+        );
+        items.push(text("AC mode: 8×V, 12×t div").size(9).into());
+        items.push(rule::horizontal(1).into());
+
+        // ── Signal information (per-channel) ──
+        if let Some(cap) = cap {
+            let v_ch1_min = frac_to_voltage(1.0, half_v_range_ch1, v_offset_ch1);
+            let v_ch1_max = frac_to_voltage(0.0, half_v_range_ch1, v_offset_ch1);
+            let v_ch2_min = frac_to_voltage(1.0, half_v_range_ch2, v_offset_ch2);
+            let v_ch2_max = frac_to_voltage(0.0, half_v_range_ch2, v_offset_ch2);
+            items.push(
+                text(format!("CH1 range: {v_ch1_min:.2}V … {v_ch1_max:.2}V")).size(11).into(),
+            );
+            if cap.ch2.is_some() {
+                items.push(
+                    text(format!("CH2 range: {v_ch2_min:.2}V … {v_ch2_max:.2}V"))
+                        .size(11)
+                        .into(),
+                );
+            }
+            items.push(
+                text(format!("Time range: {total_time_ms:.2} ms ({} samp)", cap.ch1.len()))
+                    .size(11)
+                    .into(),
+            );
+            items.push(rule::horizontal(1).into());
+        }
 
         // ── Per-channel stats ──
         if let Some(cap) = cap {
@@ -1529,7 +1595,7 @@ impl App {
         }
 
         container(column(items).spacing(4).padding(6))
-            .width(Length::Fixed(220.0))
+            .width(Length::Fixed(240.0))
             .style(container::rounded_box)
             .into()
     }
@@ -2088,11 +2154,11 @@ fn export_png(path: &std::path::Path, cap: &Capture, settings: &Settings) -> any
         };
 
     // Helper to draw scale labels (simple 3x5 digit font).
-    let v_per_div = settings.v_per_div;
     let t_per_div_ms = settings.t_per_div_ms;
-    let v_offset = settings.v_offset;
     let draw_scales_on_region =
-        |pixels: &mut Vec<u8>, x_off: u32, y_off: u32, w: u32, h: u32, _n_samples: usize, ch1_color: Option<[u8; 3]>, ch2_color: Option<[u8; 3]>| {
+        |pixels: &mut Vec<u8>, x_off: u32, y_off: u32, w: u32, h: u32, _n_samples: usize,
+         vpd_ch1: f64, vo_ch1: f64, ch1_color: Option<[u8; 3]>,
+         vpd_ch2: f64, vo_ch2: f64, ch2_color: Option<[u8; 3]>| {
             // X axis: time labels at bottom
             let cols = 10u32;
             let total_time_ms = 12.0 * t_per_div_ms;
@@ -2111,18 +2177,27 @@ fn export_png(path: &std::path::Path, cap: &Capture, settings: &Settings) -> any
 
             // Y axis: voltage labels on left margin, per-channel
             let rows = 8u32;
-            let half_v_range = 4.0 * v_per_div;
             let x_ch1 = 2u32;
             let x_ch2 = if ch1_color.is_some() { 26u32 } else { 2u32 };
-            for i in 0..=rows {
-                let frac = i as f64 / rows as f64;
-                let voltage = v_offset + half_v_range * (1.0 - 2.0 * frac);
-                let label = format!("{voltage:.1}");
-                let y_pos = y_off + (i * h / rows);
-                if let Some(c) = ch1_color {
+            // CH1 labels
+            if let Some(c) = ch1_color {
+                let half_v_range = 4.0 * vpd_ch1;
+                for i in 0..=rows {
+                    let frac = i as f64 / rows as f64;
+                    let voltage = vo_ch1 + half_v_range * (1.0 - 2.0 * frac);
+                    let label = format!("{voltage:.1}");
+                    let y_pos = y_off + (i * h / rows);
                     draw_text_tiny(pixels, width, &label, x_ch1, y_pos, c);
                 }
-                if let Some(c) = ch2_color {
+            }
+            // CH2 labels
+            if let Some(c) = ch2_color {
+                let half_v_range = 4.0 * vpd_ch2;
+                for i in 0..=rows {
+                    let frac = i as f64 / rows as f64;
+                    let voltage = vo_ch2 + half_v_range * (1.0 - 2.0 * frac);
+                    let label = format!("{voltage:.1}");
+                    let y_pos = y_off + (i * h / rows);
                     draw_text_tiny(pixels, width, &label, x_ch2, y_pos, c);
                 }
             }
@@ -2136,7 +2211,11 @@ fn export_png(path: &std::path::Path, cap: &Capture, settings: &Settings) -> any
         draw_ch(&mut pixels, &cap.ch1, [255, 217, 25], scale_margin_left, y_off_1, graph_w, sub_h);
         if settings.show_scales {
             let ch1_col = Some([255u8, 217, 25]);
-            draw_scales_on_region(&mut pixels, scale_margin_left, y_off_1, graph_w, sub_h, cap.ch1.len(), ch1_col, None);
+            draw_scales_on_region(
+                &mut pixels, scale_margin_left, y_off_1, graph_w, sub_h, cap.ch1.len(),
+                settings.v_per_div_ch1, settings.v_offset_ch1, ch1_col,
+                settings.v_per_div_ch2, settings.v_offset_ch2, None,
+            );
         }
 
         // Lower subimage: CH2
@@ -2148,7 +2227,11 @@ fn export_png(path: &std::path::Path, cap: &Capture, settings: &Settings) -> any
         if settings.show_scales {
             let ch2_col = Some([38u8, 217, 255]);
             let n = cap.ch2.as_ref().map(|c| c.len()).unwrap_or(cap.ch1.len());
-            draw_scales_on_region(&mut pixels, scale_margin_left, y_off_2, graph_w, sub_h, n, None, ch2_col);
+            draw_scales_on_region(
+                &mut pixels, scale_margin_left, y_off_2, graph_w, sub_h, n,
+                settings.v_per_div_ch1, settings.v_offset_ch1, None,
+                settings.v_per_div_ch2, settings.v_offset_ch2, ch2_col,
+            );
         }
     } else {
         // Single combined image
@@ -2164,7 +2247,11 @@ fn export_png(path: &std::path::Path, cap: &Capture, settings: &Settings) -> any
         if settings.show_scales {
             let ch1_col = if settings.show_ch1 { Some([255u8, 217, 25]) } else { None };
             let ch2_col = if settings.show_ch2 && has_ch2 { Some([38u8, 217, 255]) } else { None };
-            draw_scales_on_region(&mut pixels, scale_margin_left, 0, graph_w, graph_h, cap.ch1.len(), ch1_col, ch2_col);
+            draw_scales_on_region(
+                &mut pixels, scale_margin_left, 0, graph_w, graph_h, cap.ch1.len(),
+                settings.v_per_div_ch1, settings.v_offset_ch1, ch1_col,
+                settings.v_per_div_ch2, settings.v_offset_ch2, ch2_col,
+            );
         }
     }
 

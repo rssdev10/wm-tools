@@ -70,19 +70,24 @@ saved from the device. Files can contain one or many consecutive captures.
 
 ## Scale configuration
 
-At the top of the **Measurement** panel you can set the real-world scale:
+At the top of the **Measurement** panel you can set the real-world scale.
+**V/div** and **V/off** are per-channel (CH1 / CH2 columns), while **t/div**
+is shared (same timebase for both channels):
 
-| Field    | Default | Meaning                                         |
-|----------|---------|-------------------------------------------------|
-| V/div   | 1.0 V   | Volts per vertical division on the scope screen |
-| t/div   | 1.0 ms  | Time per horizontal division                    |
-| V/off   | 0.0 V   | Voltage at graph center (offset)                |
+| Field    | Default | Meaning                                                   |
+|----------|---------|-----------------------------------------------------------|
+| V/div   | 1.0 V   | Volts per vertical division on the scope screen (per CH)  |
+| t/div   | 1.0 ms  | Time per horizontal division (shared)                     |
+| V/off   | 0.0 V   | Voltage at graph center (offset, per CH)                  |
 
-The DSO3D12 screen has **8 vertical** and **12 horizontal** divisions (AC mode).
-All voltage and time calculations, axis labels, and PNG scales use these values.
+CH1 and CH2 can have independent V/div and V/offset settings (just like
+the real scope). The DSO3D12 screen has **8 vertical** and **12 horizontal**
+divisions (AC mode). All voltage and time calculations, axis labels, and PNG
+scales use the per-channel values.
 
-When a capture arrives via the **screenshot protocol**, V/div, t/div, and V/offset
-are automatically filled from the packet's embedded settings metadata.
+When a capture arrives via the **screenshot protocol**, V/div and V/offset
+are automatically filled for each channel from the packet's embedded settings
+metadata (CH1 and CH2 separately).
 
 ## Measurement cursors
 
@@ -91,16 +96,18 @@ In the right-hand **Measurement** panel:
 | Toggle           | Slider                     | Readings                          |
 |------------------|----------------------------|-----------------------------------|
 | ☐ Cursor X (time) | Two knobs on horizontal range | Δt (ms), frequency (Hz)         |
-| ☐ Cursor Y (voltage) | Two knobs on vertical range | ΔV (volts), absolute voltages |
+| ☐ Cursor Y (voltage) | Two knobs on vertical range | ΔV (volts) + absolute voltages per channel (CH1 and CH2) |
 
 **Drag the knob closest to your click** in the slider — or **click/drag
 directly on the graph** to move the nearest cursor line. The shaded band
 between cursors is drawn on the canvas in pink and updates in real time.
+Y cursor voltages are computed independently for CH1 and CH2 using each
+channel's V/div and V/offset settings.
 
 ### Signal information
 
 When a capture is loaded the panel also shows:
-* Voltage range for each channel (derived from V/div setting).
+* Voltage range for each channel (derived from each channel's V/div setting).
 * Total time range (derived from t/div setting) + sample count.
 * Per-channel statistics (sample count, min, max, average ADC).
 

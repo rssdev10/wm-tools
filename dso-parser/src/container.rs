@@ -16,7 +16,11 @@ pub const ZWCAP_MAGIC: &[u8; 8] = b"ZWCAP\x00\x01\x00";
 /// Top-level capture record stored in the container.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CaptureRecord {
-    /// Schema version (currently 1).
+    /// Schema version.
+    /// - **1**: legacy — CH1 from ASCII dumps stored in raw-ADC convention
+    ///   (high value = top of screen).
+    /// - **2**: current — all channels use screen-coordinate convention
+    ///   (low value = top of screen = positive voltage).
     pub schema_version: u16,
     /// How the capture was originally acquired.
     pub source_format: SourceFormat,
@@ -175,7 +179,7 @@ pub fn capture_to_record(
         });
     }
     CaptureRecord {
-        schema_version: 1,
+        schema_version: 2,
         source_format: SourceFormat::HiddenAsciiDump,
         device_model: Some("DSO3D12".to_string()),
         captured_at: Some(timestamp.format("%Y-%m-%dT%H:%M:%S%:z").to_string()),
@@ -316,7 +320,13 @@ fn measurements_to_state(m: &screenshot::Measurements, probe: u8) -> ChannelMeas
 
 /// Convert a `CaptureRecord` back to the legacy `Capture` struct for display.
 /// This allows the GUI to use a unified rendering pipeline.
+///
+/// Schema version 1 (legacy) stored CH1 from ASCII dumps in raw-ADC convention
+/// (high value = top of screen). Version 2+ stores both channels in screen-
+/// coordinate convention (low value = top of screen = positive voltage).
 pub fn record_to_capture(rec: &CaptureRecord) -> Capture {
+    let old_ascii = rec.schema_version <= 1
+        && rec.source_format == SourceFormat::HiddenAsciiDump;
     match rec.source_format {
         SourceFormat::HiddenAsciiDump => {
             let mut ch1 = Vec::new();
@@ -324,7 +334,12 @@ pub fn record_to_capture(rec: &CaptureRecord) -> Capture {
             for w in &rec.waveforms {
                 match w {
                     Waveform::RawSamples { channel: 1, counts, .. } => {
-                        ch1 = counts.iter().map(|&c| c.clamp(0, 255) as u8).collect();
+                        let mut raw: Vec<u8> = counts.iter().map(|&c| c.clamp(0, 255) as u8).collect();
+                        // Old-format: CH1 stored in raw-ADC convention → invert to match.
+                        if old_ascii {
+                            raw.iter_mut().for_each(|v| *v = 255 - *v);
+                        }
+                        ch1 = raw;
                     }
                     Waveform::RawSamples { channel: 2, counts, .. } => {
                         ch2 = Some(counts.iter().map(|&c| c.clamp(0, 255) as u8).collect());
@@ -387,7 +402,9 @@ mod tests {
     }
 
     #[test]
-    fn record_to_capture_roundtrip() {
+    fn record_to_capture_v1_backward_compat() {
+        // Old-format (schema_version == 1): CH1 stored in raw-ADC convention,
+        // CH2 already in screen-coordinate convention.
         let rec = CaptureRecord {
             schema_version: 1,
             source_format: SourceFormat::HiddenAsciiDump,
@@ -401,8 +418,31 @@ mod tests {
             ],
         };
         let cap = record_to_capture(&rec);
-        assert_eq!(cap.ch1, vec![10, 20, 30]);
+        // CH1 inverted for backward compat: 255-10=245, 255-20=235, 255-30=225
+        assert_eq!(cap.ch1, vec![245, 235, 225]);
+        // CH2 was already in screen-coordinate convention
         assert_eq!(cap.ch2, Some(vec![40, 50, 60]));
+    }
+
+    #[test]
+    fn record_to_capture_v2_roundtrip() {
+        // New format (schema_version == 2): both channels in screen-coordinate
+        // convention — no transformation needed on read-back.
+        let rec = CaptureRecord {
+            schema_version: 2,
+            source_format: SourceFormat::HiddenAsciiDump,
+            device_model: None,
+            captured_at: None,
+            raw_payload: vec![],
+            scope_state: None,
+            waveforms: vec![
+                Waveform::RawSamples { channel: 1, counts: vec![245, 235, 225], sample_interval_s: None, volts_per_count: None },
+                Waveform::RawSamples { channel: 2, counts: vec![215, 205, 195], sample_interval_s: None, volts_per_count: None },
+            ],
+        };
+        let cap = record_to_capture(&rec);
+        assert_eq!(cap.ch1, vec![245, 235, 225]);
+        assert_eq!(cap.ch2, Some(vec![215, 205, 195]));
     }
 
     #[test]

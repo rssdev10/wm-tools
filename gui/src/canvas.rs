@@ -27,12 +27,16 @@ pub struct Scope<'a, Message = ()> {
     pub has_ch1: bool,
     /// Whether CH2 data is present in the capture (for scale labelling).
     pub has_ch2: bool,
-    /// Volts per division. 8 divisions total.
-    pub v_per_div: f64,
+    /// Volts per division for CH1. 8 divisions total.
+    pub v_per_div_ch1: f64,
+    /// Volts per division for CH2. 8 divisions total.
+    pub v_per_div_ch2: f64,
     /// Time per division in milliseconds. 12 divisions total.
     pub t_per_div_ms: f64,
-    /// Voltage offset (voltage at graph center).
-    pub v_offset: f64,
+    /// Voltage offset for CH1 (voltage at graph center).
+    pub v_offset_ch1: f64,
+    /// Voltage offset for CH2 (voltage at graph center).
+    pub v_offset_ch2: f64,
     /// Callback message factory for graph clicks: (frac_x, frac_y).
     pub on_click: Option<fn(f32, f32) -> Message>,
 }
@@ -270,9 +274,11 @@ impl<Message: Clone> canvas::Program<Message> for Scope<'_, Message> {
                 self.n_samples,
                 self.has_ch1,
                 self.has_ch2,
-                self.v_per_div,
+                self.v_per_div_ch1,
+                self.v_per_div_ch2,
                 self.t_per_div_ms,
-                self.v_offset,
+                self.v_offset_ch1,
+                self.v_offset_ch2,
             );
         }
 
@@ -319,21 +325,23 @@ const V_CELLS: usize = 8;
 /// Number of horizontal divisions on the oscilloscope screen for time.
 const T_CELLS: usize = 12;
 
+#[allow(clippy::too_many_arguments)]
 fn draw_scales(
     frame: &mut Frame,
     _n_samples: usize,
     has_ch1: bool,
     has_ch2: bool,
-    v_per_div: f64,
+    v_per_div_ch1: f64,
+    v_per_div_ch2: f64,
     t_per_div_ms: f64,
-    v_offset: f64,
+    v_offset_ch1: f64,
+    v_offset_ch2: f64,
 ) {
     let size = frame.size();
     let rows = V_CELLS;
     let cols = 10; // grid visual divisions (drawn grid is 10 columns)
 
     // X axis: time labels at each visual division.
-    // Total time span = T_CELLS * t_per_div_ms. We distribute over the sample window.
     let total_time_ms = T_CELLS as f64 * t_per_div_ms;
     let dx = size.width / cols as f32;
     for i in 0..=cols {
@@ -355,17 +363,15 @@ fn draw_scales(
         frame.fill_text(label);
     }
 
-    // Y axis: voltage scale. Total range = V_CELLS * v_per_div, centered around v_offset.
-    // Top = v_offset + half_range, bottom = v_offset - half_range (AC mode).
-    let half_range_v = (rows as f64 * v_per_div) / 2.0;
+    // Y axis: voltage scale per channel.
     let ch1_x_offset = 2.0;
     let ch2_x_offset = if has_ch1 { 42.0 } else { 2.0 };
 
     if has_ch1 {
+        let half_range_v = (rows as f64 * v_per_div_ch1) / 2.0;
         for i in 0..=rows {
             let frac = i as f32 / rows as f32;
-            // frac=0 → top → v_offset+half_range; frac=1 → bottom → v_offset-half_range
-            let voltage = v_offset + half_range_v * (1.0 - 2.0 * frac as f64);
+            let voltage = v_offset_ch1 + half_range_v * (1.0 - 2.0 * frac as f64);
             let y = frac * size.height;
             let label = Text {
                 content: format!("{voltage:.2}V"),
@@ -379,9 +385,10 @@ fn draw_scales(
     }
 
     if has_ch2 {
+        let half_range_v = (rows as f64 * v_per_div_ch2) / 2.0;
         for i in 0..=rows {
             let frac = i as f32 / rows as f32;
-            let voltage = v_offset + half_range_v * (1.0 - 2.0 * frac as f64);
+            let voltage = v_offset_ch2 + half_range_v * (1.0 - 2.0 * frac as f64);
             let y = frac * size.height;
             let label = Text {
                 content: format!("{voltage:.2}V"),
@@ -423,8 +430,9 @@ fn draw_trace(frame: &mut Frame, samples: &[u8], color: Color, mode: ViewMode) {
 
     let to_xy = |i: usize, v: f32| -> Point {
         let x = (i as f32 / (n - 1).max(1) as f32) * size.width;
-        // Invert Y: higher ADC value (higher voltage) at top of screen.
-        let y = (1.0 - v / 255.0) * size.height;
+        // Capture values use screen-coordinate convention: low value = top
+        // of screen = positive voltage, high value = bottom = negative voltage.
+        let y = (v / 255.0) * size.height;
         Point::new(x, y)
     };
 

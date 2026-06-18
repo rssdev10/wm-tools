@@ -92,16 +92,18 @@ pub fn parse_captures(data: &[u8]) -> Result<Vec<Capture>, ParseError> {
         // CH1 samples end either at the CH2 marker or at the next CH1 marker
         // (next capture) or at end of file.
         let ch1_end = find_next_boundary(data, ch1_body);
-        let ch1 = decode_ascii_samples(&data[ch1_body..ch1_end]);
+        // Invert CH1 so it uses the same screen-coordinate convention as
+        // screenshot data (low value = top of screen = positive voltage),
+        // matching what was already done for CH2 below.
+        let ch1: Vec<u8> = decode_ascii_samples(&data[ch1_body..ch1_end])
+            .into_iter().map(|v| 255 - v).collect();
 
         // Check whether the next boundary is a CH2 within the same capture.
         let mut next_cursor = ch1_end;
         let ch2 = if data[ch1_end..].starts_with(CH2_MARKER) {
             let ch2_body = skip_marker_eol(data, ch1_end + CH2_MARKER.len());
             let ch2_end = find_next_boundary(data, ch2_body);
-            // The device sends CH2 ADC values with inverted polarity in the ASCII
-            // dump (a hardware quirk). Flip here so Capture.ch2 uses the same
-            // visual-screen-coordinate convention as CH1 and screenshot data:
+            // CH2 uses the same screen-coordinate convention as CH1 and screenshot data:
             // low value = near top of screen = positive voltage.
             let samples: Vec<u8> = decode_ascii_samples(&data[ch2_body..ch2_end])
                 .into_iter().map(|v| 255 - v).collect();
@@ -141,6 +143,11 @@ pub fn looks_like_dump_start(data: &[u8]) -> bool {
 
 /// Convert a raw ADC byte (0..=255) into a normalized signed value in `[-1, 1]`,
 /// matching the way the device places "screen center" at code 128.
+///
+/// **Note:** This function expects **raw ADC values** from the device, not the
+/// screen-coordinate convention used by [`Capture`] (where 0 = top of screen).
+/// `Capture.ch1` / `Capture.ch2` values are already in screen-coordinate
+/// convention and should NOT be passed here directly.
 ///
 /// This is the simplest scaling we can apply without device-side metadata
 /// (volt-scale, probe mode, zero offset). Callers that have access to the
@@ -355,7 +362,8 @@ mod tests {
     fn parses_single_ch1_capture() {
         let dump = make_dump(&[137, 138, 137, 139], None);
         let cap = parse_first(&dump).unwrap();
-        assert_eq!(cap.ch1, vec![137, 138, 137, 139]);
+        // Both channels now use screen-coordinate convention (low = top).
+        assert_eq!(cap.ch1, vec![118, 117, 118, 116]);
         assert!(cap.ch2.is_none());
     }
 
@@ -363,9 +371,8 @@ mod tests {
     fn parses_dual_channel_capture() {
         let dump = make_dump(&[10, 20, 30], Some(&[40, 50, 60]));
         let cap = parse_first(&dump).unwrap();
-        assert_eq!(cap.ch1, vec![10, 20, 30]);
-        // ASCII dump CH2 is inverted at parse time so it matches the
-        // screen-coordinate convention used by screenshot data (low value = top).
+        // Both channels now use screen-coordinate convention (low = top).
+        assert_eq!(cap.ch1, vec![245, 235, 225]);
         assert_eq!(cap.ch2.as_deref(), Some(&[215u8, 205, 195][..]));
     }
 
@@ -375,9 +382,9 @@ mod tests {
         data.extend_from_slice(&make_dump(&[4, 5, 6], Some(&[7, 8])));
         let caps = parse_captures(&data).unwrap();
         assert_eq!(caps.len(), 2);
-        assert_eq!(caps[0].ch1, vec![1, 2, 3]);
-        assert_eq!(caps[1].ch1, vec![4, 5, 6]);
-        // CH2 is inverted at parse time: 255-7=248, 255-8=247
+        // Both channels use screen-coordinate convention (low = top).
+        assert_eq!(caps[0].ch1, vec![254, 253, 252]);
+        assert_eq!(caps[1].ch1, vec![251, 250, 249]);
         assert_eq!(caps[1].ch2.as_deref(), Some(&[248u8, 247][..]));
     }
 
@@ -394,7 +401,8 @@ mod tests {
         data.extend_from_slice(b"\r\n");
         data.extend_from_slice(b"137 \x00garbage \x00200 \x00");
         let cap = parse_first(&data).unwrap();
-        assert_eq!(cap.ch1, vec![137, 200]);
+        // Inverted: 255-137=118, 255-200=55
+        assert_eq!(cap.ch1, vec![118, 55]);
     }
 
     #[test]
@@ -404,8 +412,8 @@ mod tests {
         data.extend_from_slice(b"\r\n");
         data.extend_from_slice(b"300 \x00128 \x00");
         let cap = parse_first(&data).unwrap();
-        // 300 is out-of-range for u8 and gets dropped.
-        assert_eq!(cap.ch1, vec![128]);
+        // 300 is out-of-range for u8 and gets dropped. 128 inverted = 127.
+        assert_eq!(cap.ch1, vec![127]);
     }
 
     #[test]

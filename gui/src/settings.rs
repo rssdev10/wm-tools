@@ -31,15 +31,21 @@ pub struct Settings {
     pub alert_on_data: bool,
     /// Automatically start listening when the configured port appears.
     pub auto_listen: bool,
-    /// Volts per division for the scope grid. Default 1.0 V/div.
+    /// Volts per division for CH1. Default 1.0 V/div.
     #[serde(default = "default_v_per_div")]
-    pub v_per_div: f64,
+    pub v_per_div_ch1: f64,
+    /// Volts per division for CH2. Default 1.0 V/div.
+    #[serde(default = "default_v_per_div")]
+    pub v_per_div_ch2: f64,
     /// Time per division in milliseconds. Default 1.0 ms/div.
     #[serde(default = "default_t_per_div_ms")]
     pub t_per_div_ms: f64,
-    /// Voltage offset (zero-level of graph) in volts. Default 0.0 V.
+    /// Voltage offset for CH1 (zero-level of graph) in volts. Default 0.0 V.
     #[serde(default)]
-    pub v_offset: f64,
+    pub v_offset_ch1: f64,
+    /// Voltage offset for CH2 (zero-level of graph) in volts. Default 0.0 V.
+    #[serde(default)]
+    pub v_offset_ch2: f64,
     /// Last window size (width, height) in logical pixels.
     #[serde(default = "default_window_size")]
     pub window_size: (f32, f32),
@@ -97,9 +103,11 @@ impl Default for Settings {
             split_png: false,
             alert_on_data: true,
             auto_listen: false,
-            v_per_div: 1.0,
+            v_per_div_ch1: 1.0,
+            v_per_div_ch2: 1.0,
             t_per_div_ms: 1.0,
-            v_offset: 0.0,
+            v_offset_ch1: 0.0,
+            v_offset_ch2: 0.0,
             window_size: default_window_size(),
         }
     }
