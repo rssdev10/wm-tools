@@ -2116,8 +2116,9 @@ fn export_png(path: &std::path::Path, cap: &Capture, settings: &Settings) -> any
             let sample_y = |px: u32| -> u32 {
                 let i = (px as f64 / w as f64 * (n - 1) as f64) as usize;
                 let v = samples[i.min(n - 1)];
-                // Invert Y: higher ADC value (higher voltage) at top of image.
-                let py = ((1.0 - v as f64 / 255.0) * (h - 1) as f64) as u32;
+                // Capture values use screen-coordinate convention:
+                // low value = top of screen = positive voltage.
+                let py = ((v as f64 / 255.0) * (h - 1) as f64) as u32;
                 py.min(h - 1)
             };
 
