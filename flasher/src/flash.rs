@@ -348,6 +348,7 @@ fn list_serial_ports() -> io::Result<()> {
                     }
                     #[cfg(windows)]
                     {
+                        let _ = port;
                         true
                     }
                 })

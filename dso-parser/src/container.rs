@@ -397,7 +397,7 @@ mod tests {
                 volts_per_count: None,
             }],
         };
-        let data = serialize_zwcap(&[rec.clone()]);
+        let data = serialize_zwcap(std::slice::from_ref(&rec));
         assert!(is_zwcap(&data));
         let decoded = deserialize_zwcap(&data).unwrap();
         assert_eq!(decoded.len(), 1);
