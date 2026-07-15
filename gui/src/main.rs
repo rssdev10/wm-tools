@@ -29,6 +29,7 @@ fn main() -> iced::Result {
         .window(window::Settings {
             icon,
             size: iced::Size::new(w, h),
+            min_size: Some(iced::Size::new(800.0, 500.0)),
             ..Default::default()
         })
         .run()

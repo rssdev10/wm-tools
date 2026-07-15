@@ -61,6 +61,8 @@ pub enum Message {
     GraphClicked(f32, f32),
     // Misc
     ToggleInstructions(bool),
+    OpenInstructions,
+    CloseInstructions,
     ToggleAlertOnData(bool),
     ToggleAutoListen(bool),
     // Settings dialog
@@ -127,6 +129,8 @@ pub struct App {
     capture_progress: usize,
     /// Settings dialog open flag.
     show_settings: bool,
+    /// Instructions overlay open flag.
+    show_instructions: bool,
     /// Editable fields in settings dialog.
     settings_baud_input: String,
     settings_port_input: String,
@@ -187,6 +191,7 @@ impl App {
                 serial_rx: None,
                 capture_progress: 0,
                 show_settings: false,
+                show_instructions: false,
                 settings_baud_input: baud_str,
                 settings_port_input: port_str,
                 show_firmware: false,
@@ -701,6 +706,14 @@ impl App {
                 self.settings.save();
                 Task::none()
             }
+            Message::OpenInstructions => {
+                self.show_instructions = true;
+                Task::none()
+            }
+            Message::CloseInstructions => {
+                self.show_instructions = false;
+                Task::none()
+            }
             Message::OpenSettings => {
                 self.show_settings = true;
                 self.settings_baud_input = self.settings.baud_rate.to_string();
@@ -975,6 +988,9 @@ impl App {
         if self.show_firmware {
             return self.firmware_dialog();
         }
+        if self.show_instructions {
+            return self.instructions_overlay();
+        }
         if self.show_settings {
             return self.settings_dialog();
         }
@@ -1003,23 +1019,12 @@ impl App {
         let thumbs = thumbnails(&self.dump, self.current, self.deleted_capture.is_some());
         let actions = self.action_buttons();
 
-        let instructions: Element<'_, Message> = if self.settings.show_instructions {
-            instructions_panel()
-        } else {
-            Space::new().height(Length::Fixed(0.0)).into()
-        };
-
         let bottom = column![
             controls,
             rule::horizontal(1),
             thumbs,
             rule::horizontal(1),
             actions,
-            rule::horizontal(1),
-            checkbox(self.settings.show_instructions)
-                .label("Show instructions")
-                .on_toggle(Message::ToggleInstructions),
-            instructions,
         ]
         .spacing(4)
         .padding(4);
@@ -1219,6 +1224,30 @@ impl App {
         .into()
     }
 
+    fn instructions_overlay(&self) -> Element<'_, Message> {
+        let title = text("Instructions").size(22);
+
+        let content = instructions_panel();
+
+        let close_btn = button(text("Close").size(13)).on_press(Message::CloseInstructions);
+
+        container(
+            column![
+                title,
+                Space::new().height(Length::Fixed(8.0)),
+                content,
+                Space::new().height(Length::Fixed(16.0)),
+                close_btn,
+            ]
+            .spacing(4)
+            .padding(20)
+            .max_width(700),
+        )
+        .center_x(Length::Fill)
+        .center_y(Length::Fill)
+        .into()
+    }
+
     fn menu_bar(&self) -> Element<'_, Message> {
         let port_display = match &self.settings.serial_port {
             Some(p) => text(p.clone()).size(12),
@@ -1239,6 +1268,8 @@ impl App {
         .placeholder("Port…")
         .text_size(12);
 
+        let help_btn = button(text("Help").size(12)).on_press(Message::OpenInstructions);
+
         let status_row = row![
                 text("DSO3D12").size(14),
                 Space::new().width(Length::Fixed(12.0)),
@@ -1247,6 +1278,8 @@ impl App {
                 listen_btn,
                 Space::new().width(Length::Fill),
                 text(self.status.clone()).size(12),
+                Space::new().width(Length::Fixed(8.0)),
+                help_btn
             ]
             .spacing(6)
             .align_y(iced::Alignment::Center);
@@ -1684,10 +1717,16 @@ impl App {
             }
         }
 
-        container(column(items).spacing(4).padding(6))
-            .width(Length::Fixed(240.0))
-            .style(container::rounded_box)
-            .into()
+        scrollable(
+            container(column(items).spacing(4).padding(6))
+                .width(Length::Fixed(240.0))
+                .style(container::rounded_box),
+        )
+        .direction(scrollable::Direction::Vertical(
+            scrollable::Scrollbar::new(),
+        ))
+        .width(Length::Fixed(240.0))
+        .into()
     }
 
     fn controls_panel(&self) -> Element<'_, Message> {
@@ -1766,42 +1805,89 @@ impl App {
 }
 
 // ── Helpers ────────────────────────────────────────────────────────────────
-
 fn instructions_panel<'a>() -> Element<'a, Message> {
-    let standard_fw = "Standard firmware (raw debug dump):\n\n\
-        1. Feed a signal into the scope.\n\
-        2. Press Stop to freeze the sample buffer.\n\
-        3. Press Menu → Stop so Channel 1\n   Measurements menu is on screen.\n\
-        4. Long-press the Save button to start\n   the debug data transmission.\n\
-        5. Wait until the transfer completes\n   (~300 kB at 115200 baud).";
+    // Keep each complete instruction block in a separate string so it can be
+    // moved into locale files later without restructuring the widget tree.
+    let standard_firmware_instructions = "\
+Standard firmware — raw debug dump
 
-    let screenshot_fw = "Customized firmware:\n\
-        1. Capture a waveform on the device\n   (press Save while running or stopped).\n\
-        2. Press Menu → Gallery to open\n   the saved screenshots list.\n\
-        3. Select the waveform to transmit.\n\
-        4. The device sends a 2048-byte binary\n   packet automatically over USB-serial.\n\
-        5. Includes full metadata: V/div, timebase,\n   trigger, cursors, measurements.";
+1. Connect the oscilloscope to the computer using a USB Type-C cable.
+2. Feed a signal into the oscilloscope.
+3. Press Stop to freeze the sample buffer.
+4. Press Menu → Stop and leave the Channel 1 Measurements menu open.
+5. In the application, select the serial port and click Listen.
+6. Long-press the Save button on the oscilloscope to start transmitting the debug data.
+7. Wait for the transfer to complete. The oscilloscope sends approximately 300 kB at 115200 baud.";
 
-    let left = container(text(standard_fw).size(11))
-        .padding(6)
-        .width(Length::FillPortion(1));
-    let right = container(
-        column![
-            button(text("ZeeTweak (GitHub)").size(11))
-                .on_press(Message::OpenUrl("https://github.com/taligentx/ZeeTweak".to_string()))
-                .style(button::text),
-            text(screenshot_fw).size(11),
-        ]
-        .spacing(2),
+    let customized_firmware_instructions = "\
+Customized firmware
+
+1. Connect the oscilloscope to the computer using a USB Type-C cable.
+2. In the application, select the serial port and click Listen.
+3. Capture a waveform on the oscilloscope by pressing Save while acquisition is running or stopped.
+4. Press Menu → Gallery to open the saved screenshots.
+5. Select the waveform that you want to transmit.
+6. The oscilloscope automatically sends a 2048-byte binary packet over the USB serial connection.
+7. The packet includes waveform data and metadata such as V/div, timebase, trigger settings, cursors, and measurements.";
+
+    let application_instructions = "\
+Using the waveform viewer
+
+The application can receive oscilloscope data in both supported transmission modes.
+
+After a waveform is received, you can inspect it, measure voltage and time intervals with cursors, and export the result as a PNG image or CSV data.
+
+Before receiving data, connect the oscilloscope using a USB Type-C cable, select the correct serial port, and click Listen. Keep the application listening while starting the transmission from the oscilloscope.";
+
+    let standard_firmware = container(
+        text(standard_firmware_instructions)
+            .size(11)
+            .width(Length::Fill),
     )
-        .padding(6)
-        .width(Length::FillPortion(1));
+    .padding(6)
+    .width(Length::FillPortion(1));
+
+    let customized_firmware = container(
+        column![
+            button(text("ZeeTweak on GitHub").size(11))
+                .on_press(Message::OpenUrl(
+                    "https://github.com/taligentx/ZeeTweak".to_owned(),
+                ))
+                .style(button::text),
+            text(customized_firmware_instructions)
+                .size(11)
+                .width(Length::Fill),
+        ]
+        .spacing(6),
+    )
+    .padding(6)
+    .width(Length::FillPortion(1));
+
+    let application = container(
+        text(application_instructions)
+            .size(11)
+            .width(Length::Fill),
+    )
+    .padding(6)
+    .width(Length::Fill);
 
     container(
-        row![left, rule::vertical(1), right]
+        column![
+            row![
+                standard_firmware,
+                rule::vertical(1),
+                customized_firmware,
+            ]
             .spacing(4)
+            .width(Length::Fill),
+            rule::horizontal(1),
+            application,
+        ]
+        .spacing(4)
+        .width(Length::Fill),
     )
     .padding(4)
+    .width(Length::Fill)
     .style(container::rounded_box)
     .into()
 }
