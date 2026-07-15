@@ -3,14 +3,16 @@
 use std::path::PathBuf;
 
 use chrono::{DateTime, Local};
-use dso_parser::{Capture, DEFAULT_BUFFER_DEPTH};
+use dso_parser::{ADC_VALUE_MID, Capture, DEFAULT_BUFFER_DEPTH};
+#[cfg(test)]
+use dso_parser::ADC_VALUE_MAX;
 use iced::widget::{
     button, canvas, checkbox, column, container, pick_list, progress_bar, row, rule,
     scrollable, text, text_input, Space,
 };
 use iced::{Element, Length, Subscription, Task, Theme};
 
-use crate::canvas::{Scope, Thumbnail};
+use crate::canvas::{Scope, T_CELLS, Thumbnail, V_CELLS};
 use crate::range_slider;
 use crate::serial::{self, SerialConfig, SerialEvent, SerialHandle};
 use crate::settings::{Settings, ViewMode};
@@ -317,6 +319,17 @@ impl App {
                 log::info!("{}", self.status);
                 self.current = 0;
                 self.dump = Some(d);
+                // Auto-populate from the first record's scope_state only if it
+                // is the record being shown (single-capture files). For multi-
+                // capture files the user must select a record to apply its
+                // scope_state via the thumbnail strip.
+                if self.dump.as_ref().map(|d| d.captures.len() <= 1).unwrap_or(false) {
+                    if let Some(state) = self.current_entry()
+                        .and_then(|e| e.record.scope_state.clone())
+                    {
+                        self.apply_scope_state(&state);
+                    }
+                }
                 Task::none()
             }
             Message::Loaded(Err(e)) => {
@@ -380,6 +393,12 @@ impl App {
                 if let Some(d) = &self.dump {
                     if i < d.captures.len() {
                         self.current = i;
+                        // Clone scope_state before calling apply_scope_state
+                        // to avoid borrow conflict with self.dump.
+                        let scope_state = d.captures[i].record.scope_state.clone();
+                        if let Some(ref state) = scope_state {
+                            self.apply_scope_state(state);
+                        }
                     }
                 }
                 Task::none()
@@ -505,8 +524,10 @@ impl App {
                                         self.settings.v_per_div_ch1 = s.ch1.volt_scale_uv as f64 / 1_000_000.0 * probe1;
                                         self.settings.v_per_div_ch2 = s.ch2.volt_scale_uv as f64 / 1_000_000.0 * probe2;
                                         self.settings.t_per_div_ms = s.timebase_ns_per_div as f64 / 1_000_000.0;
-                                        self.settings.v_offset_ch1 = s.ch1.zero_volt_uv as f64 / 1_000_000.0 * probe1;
-                                        self.settings.v_offset_ch2 = s.ch2.zero_volt_uv as f64 / 1_000_000.0 * probe2;
+                                        // pixel_to_volts at screen centre gives  −zero_volt_pixels × vpp × mult,
+                                        // but zero_volt_uv stores the value with opposite sign → negate.
+                                        self.settings.v_offset_ch1 = -(s.ch1.zero_volt_uv as f64) / 1_000_000.0 * probe1;
+                                        self.settings.v_offset_ch2 = -(s.ch2.zero_volt_uv as f64) / 1_000_000.0 * probe2;
                                         self.v_per_div_ch1_input = format_float(self.settings.v_per_div_ch1);
                                         self.v_per_div_ch2_input = format_float(self.settings.v_per_div_ch2);
                                         self.t_per_div_input = format_float(self.settings.t_per_div_ms);
@@ -1237,6 +1258,32 @@ impl App {
         .into()
     }
 
+    /// Apply oscilloscope state metadata (V/div, V/offset, t/div) to the
+    /// current settings and input fields. Used when loading captures that
+    /// contain embedded scope_state (screenshot packets or .zwcap files).
+    ///
+    /// Note: `v_offset_v` is stored with the same sign as the device's
+    /// `zero_volt_uv` field.  The device's `pixel_to_volts` formula at
+    /// screen centre gives `−zero_volt_pixels × vpp × mult`, i.e. the
+    /// *opposite* sign, so we negate here.
+    fn apply_scope_state(&mut self, state: &dso_parser::ScopeState) {
+        if let Some(ref ch1) = state.ch1 {
+            self.settings.v_per_div_ch1 = ch1.vdiv_v;
+            self.settings.v_offset_ch1 = -ch1.v_offset_v;
+        }
+        if let Some(ref ch2) = state.ch2 {
+            self.settings.v_per_div_ch2 = ch2.vdiv_v;
+            self.settings.v_offset_ch2 = -ch2.v_offset_v;
+        }
+        self.settings.t_per_div_ms = state.timebase_ns_per_div as f64 / 1_000_000.0;
+        self.v_per_div_ch1_input = format_float(self.settings.v_per_div_ch1);
+        self.v_per_div_ch2_input = format_float(self.settings.v_per_div_ch2);
+        self.t_per_div_input = format_float(self.settings.t_per_div_ms);
+        self.v_offset_ch1_input = format_float(self.settings.v_offset_ch1);
+        self.v_offset_ch2_input = format_float(self.settings.v_offset_ch2);
+        self.settings.save();
+    }
+
     fn scope_widget(&self) -> Element<'_, Message> {
         let cap = self.current_capture();
         log::trace!(
@@ -1286,6 +1333,10 @@ impl App {
             t_per_div_ms: self.settings.t_per_div_ms,
             v_offset_ch1: self.settings.v_offset_ch1,
             v_offset_ch2: self.settings.v_offset_ch2,
+            active_channel: self.current_entry()
+                .and_then(|e| e.record.scope_state.as_ref())
+                .map(|s| s.active_channel)
+                .unwrap_or(0),
             on_click: Some(Message::GraphClicked),
         };
         canvas(scope)
@@ -1308,8 +1359,6 @@ impl App {
         let t_per_div_ms = self.settings.t_per_div_ms;
         let v_offset_ch1 = self.settings.v_offset_ch1;
         let v_offset_ch2 = self.settings.v_offset_ch2;
-        let half_v_range_ch1 = 4.0 * v_per_div_ch1; // 8 div / 2
-        let half_v_range_ch2 = 4.0 * v_per_div_ch2;
         let total_time_ms = 12.0 * t_per_div_ms;
 
         let mut items: Vec<Element<'_, Message>> = vec![
@@ -1357,10 +1406,10 @@ impl App {
 
         if self.settings.measurement_cursor_y_enabled {
             items.push(range_slider::horizontal(ylo, yhi, Message::MeasCursorYChanged));
-            let v_ch1_lo = frac_to_voltage(ylo as f64, half_v_range_ch1, v_offset_ch1);
-            let v_ch1_hi = frac_to_voltage(yhi as f64, half_v_range_ch1, v_offset_ch1);
-            let v_ch2_lo = frac_to_voltage(ylo as f64, half_v_range_ch2, v_offset_ch2);
-            let v_ch2_hi = frac_to_voltage(yhi as f64, half_v_range_ch2, v_offset_ch2);
+            let v_ch1_lo = frac_to_voltage(ylo as f64, v_per_div_ch1, v_offset_ch1);
+            let v_ch1_hi = frac_to_voltage(yhi as f64, v_per_div_ch1, v_offset_ch1);
+            let v_ch2_lo = frac_to_voltage(ylo as f64, v_per_div_ch2, v_offset_ch2);
+            let v_ch2_hi = frac_to_voltage(yhi as f64, v_per_div_ch2, v_offset_ch2);
             let dv_ch1 = (v_ch1_hi - v_ch1_lo).abs();
             let dv_ch2 = (v_ch2_hi - v_ch2_lo).abs();
             items.push(
@@ -1407,6 +1456,30 @@ impl App {
             .align_y(iced::Alignment::Center)
             .into(),
         );
+        // Probe row (from device metadata, if available)
+        let probe_ch1 = self.current_entry()
+            .and_then(|e| e.record.scope_state.as_ref())
+            .and_then(|s| s.ch1.as_ref())
+            .map(|c| c.probe.clone())
+            .unwrap_or_default();
+        let probe_ch2 = self.current_entry()
+            .and_then(|e| e.record.scope_state.as_ref())
+            .and_then(|s| s.ch2.as_ref())
+            .map(|c| c.probe.clone())
+            .unwrap_or_default();
+        if !probe_ch1.is_empty() || !probe_ch2.is_empty() {
+            let p1 = if probe_ch1.is_empty() { "—".to_string() } else { probe_ch1 };
+            let p2 = if probe_ch2.is_empty() { "—".to_string() } else { probe_ch2 };
+            items.push(
+                row![
+                    text("Probe:").size(11).width(col_w),
+                    text(p1).size(11).width(input_w),
+                    text(p2).size(11).width(input_w),
+                ]
+                .spacing(2)
+                .into(),
+            );
+        }
         // V/off row
         items.push(
             row![
@@ -1442,16 +1515,18 @@ impl App {
 
         // ── Signal information (per-channel) ──
         if let Some(cap) = cap {
-            let v_ch1_min = frac_to_voltage(1.0, half_v_range_ch1, v_offset_ch1);
-            let v_ch1_max = frac_to_voltage(0.0, half_v_range_ch1, v_offset_ch1);
-            let v_ch2_min = frac_to_voltage(1.0, half_v_range_ch2, v_offset_ch2);
-            let v_ch2_max = frac_to_voltage(0.0, half_v_range_ch2, v_offset_ch2);
+            let (ch1_mn, ch1_mx, _) = stats(&cap.ch1);
+            let v_ch1_neg = v_offset_ch1 + (ADC_VALUE_MID as f64 - ch1_mx as f64) * v_per_div_ch1 / PX_PER_DIV;
+            let v_ch1_pos = v_offset_ch1 + (ADC_VALUE_MID as f64 - ch1_mn as f64) * v_per_div_ch1 / PX_PER_DIV;
             items.push(
-                text(format!("CH1 range: {v_ch1_min:.2}V … {v_ch1_max:.2}V")).size(11).into(),
+                text(format!("CH1 range: {v_ch1_neg:.2}V … {v_ch1_pos:.2}V")).size(11).into(),
             );
-            if cap.ch2.is_some() {
+            if let Some(ch2) = &cap.ch2 {
+                let (ch2_mn, ch2_mx, _) = stats(ch2);
+                let v_ch2_neg = v_offset_ch2 + (ADC_VALUE_MID as f64 - ch2_mx as f64) * v_per_div_ch2 / PX_PER_DIV;
+                let v_ch2_pos = v_offset_ch2 + (ADC_VALUE_MID as f64 - ch2_mn as f64) * v_per_div_ch2 / PX_PER_DIV;
                 items.push(
-                    text(format!("CH2 range: {v_ch2_min:.2}V … {v_ch2_max:.2}V"))
+                    text(format!("CH2 range: {v_ch2_neg:.2}V … {v_ch2_pos:.2}V"))
                         .size(11)
                         .into(),
                 );
@@ -1502,6 +1577,21 @@ impl App {
                     .size(10)
                     .into(),
             );
+            // Channel probe/coupling info
+            if let Some(ref ch1) = scope_state.ch1 {
+                items.push(
+                    text(format!("CH1: {} probe, {}", ch1.probe, ch1.coupling))
+                        .size(10)
+                        .into(),
+                );
+            }
+            if let Some(ref ch2) = scope_state.ch2 {
+                items.push(
+                    text(format!("CH2: {} probe, {}", ch2.probe, ch2.coupling))
+                        .size(10)
+                        .into(),
+                );
+            }
             items.push(
                 text(format!(
                     "Delay: {:.6} s | Rate: {:.0} Sa/s",
@@ -1735,7 +1825,7 @@ pub(crate) fn stats(samples: &[u8]) -> (u8, u8, f32) {
 /// Used in tests.
 #[cfg(test)]
 fn adc_to_voltage(adc: u8) -> f32 {
-    (adc as f32 - 128.0) * 5.0 / 128.0
+    (adc as f32 - ADC_VALUE_MID as f32) * 5.0 / ADC_VALUE_MID as f32
 }
 
 /// Convert a fractional position (0.0..1.0) on the Y axis to voltage
@@ -1755,8 +1845,15 @@ fn format_float(v: f64) -> String {
     }
 }
 
-fn frac_to_voltage(frac: f64, half_v_range: f64, v_offset: f64) -> f64 {
-    v_offset + half_v_range * (1.0 - 2.0 * frac)
+/// Grid constants from canvas.rs: 8 divs × 25 px/div = 200 px grid height.
+use crate::canvas::{GRID_HEIGHT_PX, PX_PER_DIV};
+
+/// Convert a fractional Y position on the graph (0.0 = top, 1.0 = bottom)
+/// to voltage.  Formula from pixel_to_volts: V = V_offset + (ADC_MID - v) × V/div / PX_PER_DIV,
+/// where v = frac × GRID_HEIGHT_PX is the stored ADC value at that position.
+fn frac_to_voltage(frac: f64, v_per_div: f64, v_offset: f64) -> f64 {
+    let v = frac * GRID_HEIGHT_PX;
+    v_offset + (ADC_VALUE_MID as f64 - v) * v_per_div / PX_PER_DIV
 }
 
 /// Convert sample count to time in milliseconds at the default 1 MHz sample rate.
@@ -1772,7 +1869,7 @@ fn samples_to_time_ms(n: usize) -> f64 {
 /// Thumbnails strip: scrollable row of mini waveform canvases.
 /// Each thumbnail shows the signal shape and is clickable.
 fn thumbnails<'a>(dump: &'a Option<LoadedDump>, current: usize, can_undo: bool) -> Element<'a, Message> {
-    let is_empty = dump.as_ref().map_or(true, |d| d.captures.is_empty());
+    let is_empty = dump.as_ref().is_none_or(|d| d.captures.is_empty());
     if is_empty {
         if can_undo {
             return container(
@@ -2064,10 +2161,17 @@ fn export_csv(path: &std::path::Path, cap: &Capture) -> anyhow::Result<()> {
     Ok(())
 }
 
+// ── PNG export colour palette (mirrors canvas.rs constants) ────────────────
+const PNG_BG: [u8; 3] = [10, 15, 26];
+const PNG_GRID: [u8; 3] = [51, 61, 77];
+const PNG_CH1: [u8; 3] = [255, 217, 25];
+const PNG_CH2: [u8; 3] = [242, 25, 242];
+const PNG_SCALE_TEXT: [u8; 3] = [153, 166, 179];
+
 /// Export the current capture as a PNG image.
 fn export_png(path: &std::path::Path, cap: &Capture, settings: &Settings) -> anyhow::Result<()> {
-    let graph_w: u32 = 1200;
-    let graph_h: u32 = 600;
+    let graph_w: u32 = T_CELLS as u32 * 50;
+    let graph_h: u32 = V_CELLS as u32 * 50;
     let scale_margin_left: u32 = if settings.show_scales { 50 } else { 0 };
     let scale_margin_bottom: u32 = if settings.show_scales { 16 } else { 0 };
 
@@ -2082,23 +2186,22 @@ fn export_png(path: &std::path::Path, cap: &Capture, settings: &Settings) -> any
     };
 
     let mut pixels = vec![0u8; (width * height * 3) as usize];
-    let bg = [10u8, 15, 26];
     for chunk in pixels.chunks_exact_mut(3) {
-        chunk.copy_from_slice(&bg);
+        chunk.copy_from_slice(&PNG_BG);
     }
 
     // Helper to draw a grid into a sub-region of the pixel buffer.
     let draw_grid = |pixels: &mut Vec<u8>, x_off: u32, y_off: u32, w: u32, h: u32| {
-        let grid_color = [51u8, 61, 77];
-        for col in 1..10u32 {
-            let x = x_off + col * w / 10;
+        let grid_color = PNG_GRID;
+        for col in 1..T_CELLS as u32 {
+            let x = x_off + col * w / T_CELLS as u32;
             for y in y_off..y_off + h {
                 let idx = ((y * width + x) * 3) as usize;
                 pixels[idx..idx + 3].copy_from_slice(&grid_color);
             }
         }
-        for r in 1..8u32 {
-            let y = y_off + r * h / 8;
+        for r in 1..V_CELLS as u32 {
+            let y = y_off + r * h / V_CELLS as u32;
             for x in x_off..x_off + w {
                 let idx = ((y * width + x) * 3) as usize;
                 pixels[idx..idx + 3].copy_from_slice(&grid_color);
@@ -2116,10 +2219,9 @@ fn export_png(path: &std::path::Path, cap: &Capture, settings: &Settings) -> any
             let sample_y = |px: u32| -> u32 {
                 let i = (px as f64 / w as f64 * (n - 1) as f64) as usize;
                 let v = samples[i.min(n - 1)];
-                // Capture values use screen-coordinate convention:
-                // low value = top of screen = positive voltage.
-                let py = ((v as f64 / 255.0) * (h - 1) as f64) as u32;
-                py.min(h - 1)
+                // Match draw_trace: subtract PX_PER_DIV so v=25 maps to y=0 (top).
+                let yf = ((v as f64 - PX_PER_DIV) / GRID_HEIGHT_PX) * (h - 1) as f64;
+                yf.round().max(0.0).min((h - 1) as f64) as u32
             };
 
             let mut prev_y = sample_y(0);
@@ -2161,8 +2263,8 @@ fn export_png(path: &std::path::Path, cap: &Capture, settings: &Settings) -> any
          vpd_ch1: f64, vo_ch1: f64, ch1_color: Option<[u8; 3]>,
          vpd_ch2: f64, vo_ch2: f64, ch2_color: Option<[u8; 3]>| {
             // X axis: time labels at bottom
-            let cols = 10u32;
-            let total_time_ms = 12.0 * t_per_div_ms;
+            let cols = T_CELLS as u32;
+            let total_time_ms = T_CELLS as f64 * t_per_div_ms;
             for i in 0..=cols {
                 let frac = i as f64 / cols as f64;
                 let time_ms = frac * total_time_ms;
@@ -2173,81 +2275,68 @@ fn export_png(path: &std::path::Path, cap: &Capture, settings: &Settings) -> any
                 };
                 let x_pos = x_off + i * w / cols + 2;
                 let y_pos = y_off + h + 2;
-                draw_text_tiny(pixels, width, &label, x_pos, y_pos, [153, 166, 179]);
+                draw_text_tiny(pixels, width, height, &label, x_pos, y_pos, PNG_SCALE_TEXT);
             }
 
-            // Y axis: voltage labels on left margin, per-channel
-            let rows = 8u32;
+            // Y axis: voltage labels on left margin, per-channel.
+            // Formula from pixel_to_volts: V = V_offset + (ADC_MID - v) × V/div / PX_PER_DIV.
+            // Match draw_scales: use (i+1) offset so v=25 maps to top label.
+            let rows = V_CELLS as u32;
+            let mut draw_voltage_label = |vpd: f64, vo: f64, color: [u8; 3], x_lbl: u32| {
+                for i in 0..=rows {
+                    let v = ((i + 1) as f64 / rows as f64) * GRID_HEIGHT_PX;
+                    let voltage = vo + (ADC_VALUE_MID as f64 - v) * vpd / PX_PER_DIV;
+                    let y_pos = y_off + (i * h / rows);
+                    draw_text_tiny(pixels, width, height, &format!("{voltage:.1}"), x_lbl, y_pos, color);
+                }
+            };
+
             let x_ch1 = 2u32;
             let x_ch2 = if ch1_color.is_some() { 26u32 } else { 2u32 };
-            // CH1 labels
-            if let Some(c) = ch1_color {
-                let half_v_range = 4.0 * vpd_ch1;
-                for i in 0..=rows {
-                    let frac = i as f64 / rows as f64;
-                    let voltage = vo_ch1 + half_v_range * (1.0 - 2.0 * frac);
-                    let label = format!("{voltage:.1}");
-                    let y_pos = y_off + (i * h / rows);
-                    draw_text_tiny(pixels, width, &label, x_ch1, y_pos, c);
-                }
-            }
-            // CH2 labels
-            if let Some(c) = ch2_color {
-                let half_v_range = 4.0 * vpd_ch2;
-                for i in 0..=rows {
-                    let frac = i as f64 / rows as f64;
-                    let voltage = vo_ch2 + half_v_range * (1.0 - 2.0 * frac);
-                    let label = format!("{voltage:.1}");
-                    let y_pos = y_off + (i * h / rows);
-                    draw_text_tiny(pixels, width, &label, x_ch2, y_pos, c);
-                }
-            }
+            if let Some(c) = ch1_color { draw_voltage_label(vpd_ch1, vo_ch1, c, x_ch1); }
+            if let Some(c) = ch2_color { draw_voltage_label(vpd_ch2, vo_ch2, c, x_ch2); }
         };
 
-    if do_split {
-        let sub_h = graph_h;
-        // Upper subimage: CH1
-        let y_off_1 = 0u32;
-        draw_grid(&mut pixels, scale_margin_left, y_off_1, graph_w, sub_h);
-        draw_ch(&mut pixels, &cap.ch1, [255, 217, 25], scale_margin_left, y_off_1, graph_w, sub_h);
-        if settings.show_scales {
-            let ch1_col = Some([255u8, 217, 25]);
+    // Draw one channel into a region: grid + trace + optional scale labels.
+    let mut draw_one = |samples: &[u8], trace_color: [u8; 3],
+                    y_off: u32, vpd: f64, vo: f64, ch_col: Option<[u8; 3]>| {
+        draw_grid(&mut pixels, scale_margin_left, y_off, graph_w, graph_h);
+        if !samples.is_empty() {
+            draw_ch(&mut pixels, samples, trace_color, scale_margin_left, y_off, graph_w, graph_h);
+        }
+        if let Some(c) = ch_col {
             draw_scales_on_region(
-                &mut pixels, scale_margin_left, y_off_1, graph_w, sub_h, cap.ch1.len(),
-                settings.v_per_div_ch1, settings.v_offset_ch1, ch1_col,
-                settings.v_per_div_ch2, settings.v_offset_ch2, None,
+                &mut pixels, scale_margin_left, y_off, graph_w, graph_h, samples.len(),
+                vpd, vo, Some(c), 0.0, 0.0, None,
             );
         }
+    };
+
+    if do_split {
+        // Upper subimage: CH1
+        let ch1_col = settings.show_scales.then_some(PNG_CH1);
+        draw_one(&cap.ch1, PNG_CH1, 0, settings.v_per_div_ch1, settings.v_offset_ch1, ch1_col);
 
         // Lower subimage: CH2
-        let y_off_2 = graph_h + scale_margin_bottom;
-        draw_grid(&mut pixels, scale_margin_left, y_off_2, graph_w, sub_h);
+        let ch2_col = settings.show_scales.then_some(PNG_CH2);
         if let Some(ch2) = &cap.ch2 {
-            draw_ch(&mut pixels, ch2, [38, 217, 255], scale_margin_left, y_off_2, graph_w, sub_h);
-        }
-        if settings.show_scales {
-            let ch2_col = Some([38u8, 217, 255]);
-            let n = cap.ch2.as_ref().map(|c| c.len()).unwrap_or(cap.ch1.len());
-            draw_scales_on_region(
-                &mut pixels, scale_margin_left, y_off_2, graph_w, sub_h, n,
-                settings.v_per_div_ch1, settings.v_offset_ch1, None,
-                settings.v_per_div_ch2, settings.v_offset_ch2, ch2_col,
-            );
+            draw_one(ch2, PNG_CH2, graph_h + scale_margin_bottom,
+                     settings.v_per_div_ch2, settings.v_offset_ch2, ch2_col);
         }
     } else {
         // Single combined image
         draw_grid(&mut pixels, scale_margin_left, 0, graph_w, graph_h);
         if settings.show_ch1 {
-            draw_ch(&mut pixels, &cap.ch1, [255, 217, 25], scale_margin_left, 0, graph_w, graph_h);
+            draw_ch(&mut pixels, &cap.ch1, PNG_CH1, scale_margin_left, 0, graph_w, graph_h);
         }
         if settings.show_ch2 {
             if let Some(ch2) = &cap.ch2 {
-                draw_ch(&mut pixels, ch2, [38, 217, 255], scale_margin_left, 0, graph_w, graph_h);
+                draw_ch(&mut pixels, ch2, PNG_CH2, scale_margin_left, 0, graph_w, graph_h);
             }
         }
         if settings.show_scales {
-            let ch1_col = if settings.show_ch1 { Some([255u8, 217, 25]) } else { None };
-            let ch2_col = if settings.show_ch2 && has_ch2 { Some([38u8, 217, 255]) } else { None };
+            let ch1_col = if settings.show_ch1 { Some(PNG_CH1) } else { None };
+            let ch2_col = if settings.show_ch2 && has_ch2 { Some(PNG_CH2) } else { None };
             draw_scales_on_region(
                 &mut pixels, scale_margin_left, 0, graph_w, graph_h, cap.ch1.len(),
                 settings.v_per_div_ch1, settings.v_offset_ch1, ch1_col,
@@ -2260,8 +2349,23 @@ fn export_png(path: &std::path::Path, cap: &Capture, settings: &Settings) -> any
     Ok(())
 }
 
-/// Draw a string using a tiny 3x5 pixel font. Each character is 4px wide (3+1 spacing).
-fn draw_text_tiny(pixels: &mut [u8], img_width: u32, text: &str, x: u32, y: u32, color: [u8; 3]) {
+/// Threshold below which the tiny (3×5) bitmap font is used instead of a system font.
+const TINY_FONT_MAX_HEIGHT: u32 = 1000;
+
+/// Draw text onto a raw RGB pixel buffer.
+///
+/// Uses the built-in 3×5 bitmap font when `img_height ≤ TINY_FONT_MAX_HEIGHT`,
+/// otherwise renders with the system monospace font via `ab_glyph`.
+fn draw_text_tiny(pixels: &mut [u8], img_width: u32, img_height: u32, text: &str, x: u32, y: u32, color: [u8; 3]) {
+    if img_height <= TINY_FONT_MAX_HEIGHT {
+        draw_tiny_glyph(pixels, img_width, text, x, y, color);
+    } else {
+        draw_system_font(pixels, img_width, text, x, y, color);
+    }
+}
+
+/// Render text with the built-in 3×5 bitmap font.
+fn draw_tiny_glyph(pixels: &mut [u8], img_width: u32, text: &str, x: u32, y: u32, color: [u8; 3]) {
     let mut cx = x;
     for ch in text.chars() {
         let glyph = tiny_glyph(ch);
@@ -2278,6 +2382,118 @@ fn draw_text_tiny(pixels: &mut [u8], img_width: u32, text: &str, x: u32, y: u32,
             }
         }
         cx += 4;
+    }
+}
+
+/// Render text using a system monospace font via `ab_glyph`.
+/// Render text into an RGB pixel buffer using the operating system's
+/// default monospace font family.
+fn draw_system_font(
+    pixels: &mut [u8],
+    img_width: u32,
+    text: &str,
+    x: u32,
+    y: u32,
+    color: [u8; 3],
+) {
+    use ab_glyph::{Font, FontArc, PxScale, ScaleFont};
+    use font_kit::{
+        family_name::FamilyName,
+        properties::Properties,
+        source::SystemSource,
+    };
+    use std::sync::OnceLock;
+
+    /// Resolve the default system monospace family and convert it to an
+    /// `ab_glyph` font.
+    fn load_system_monospace() -> Option<FontArc> {
+        let handle = SystemSource::new()
+            .select_best_match(
+                &[FamilyName::Monospace],
+                &Properties::new(),
+            )
+            .ok()?;
+
+        // Extract font data and index from the handle, then load via ab_glyph.
+        let (font_data, font_index) = match &handle {
+            font_kit::handle::Handle::Memory { bytes, font_index } => {
+                ((**bytes).clone(), *font_index)
+            }
+            font_kit::handle::Handle::Path { path, font_index } => {
+                (std::fs::read(path).ok()?, *font_index)
+            }
+        };
+
+        let font = ab_glyph::FontVec::try_from_vec_and_index(font_data, font_index).ok()?;
+        Some(FontArc::new(font))
+    }
+
+    static FONT: OnceLock<Option<FontArc>> = OnceLock::new();
+
+    let Some(font) = FONT.get_or_init(load_system_monospace).as_ref() else {
+        return;
+    };
+
+    const FONT_SIZE: f32 = 11.0;
+
+    let scaled_font = font.as_scaled(PxScale::from(FONT_SIZE));
+    let baseline = y as f32 + scaled_font.ascent();
+
+    let mut cursor_x = x as f32;
+
+    for ch in text.chars() {
+        let glyph_id = font.glyph_id(ch);
+
+        let glyph = glyph_id.with_scale_and_position(
+            FONT_SIZE,
+            ab_glyph::point(cursor_x, baseline),
+        );
+
+        if let Some(outlined) = font.outline_glyph(glyph) {
+            let bounds = outlined.px_bounds();
+
+            outlined.draw(|local_x, local_y, coverage| {
+                let pixel_x = bounds.min.x.floor() as i32 + local_x as i32;
+                let pixel_y = bounds.min.y.floor() as i32 + local_y as i32;
+
+                if pixel_x < 0 || pixel_y < 0 {
+                    return;
+                }
+
+                let pixel_x = pixel_x as u32;
+                let pixel_y = pixel_y as u32;
+
+                if pixel_x >= img_width {
+                    return;
+                }
+
+                let index =
+                    (pixel_y as usize * img_width as usize + pixel_x as usize) * 3;
+
+                let Some(destination) = pixels.get_mut(index..index + 3) else {
+                    return;
+                };
+
+                blend_rgb(destination, color, coverage);
+            });
+        }
+
+        cursor_x += scaled_font.h_advance(glyph_id);
+    }
+}
+
+/// Alpha-blend one RGB color over another.
+fn blend_rgb(destination: &mut [u8], foreground: [u8; 3], alpha: f32) {
+    let alpha = alpha.clamp(0.0, 1.0);
+    let inverse_alpha = 1.0 - alpha;
+
+    for channel in 0..3 {
+        destination[channel] = (
+            foreground[channel] as f32 * alpha
+                + destination[channel] as f32 * inverse_alpha
+        )
+            .round()
+            .clamp(0.0, 255.0) as u8;
     }
 }
 
@@ -2519,10 +2735,10 @@ mod tests {
 
     #[test]
     fn adc_voltage_conversion() {
-        // 128 → 0V (center), 0 → -5V, 255 → ~+5V
-        assert!((adc_to_voltage(128) - 0.0).abs() < 0.05);
+        // ADC_VALUE_MID → 0V (center), 0 → -5V, ADC_VALUE_MAX → ~+5V
+        assert!((adc_to_voltage(ADC_VALUE_MID) - 0.0).abs() < 0.05);
         assert!((adc_to_voltage(0) - (-5.0)).abs() < 0.05);
-        assert!((adc_to_voltage(255) - 4.96).abs() < 0.1);
+        assert!((adc_to_voltage(ADC_VALUE_MAX) - 4.96).abs() < 0.1);
     }
 
     #[test]

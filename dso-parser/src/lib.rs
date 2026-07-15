@@ -42,7 +42,18 @@ pub const CH1_MARKER: &[u8] = b"--------CH1--------";
 /// ASCII header marking the start of channel 2 samples.
 pub const CH2_MARKER: &[u8] = b"--------CH2--------";
 
-/// A single decoded oscilloscope capture.
+// ── ADC & display constants ───────────────────────────────────────────────
+
+/// Maximum ADC sample value (8-bit unsigned).
+pub const ADC_VALUE_MAX: u8 = 255;
+
+/// ADC midpoint (centre of the 0..=255 range, zero reference in pixel_to_volts).
+pub const ADC_VALUE_MID: u8 = 128;
+
+/// Device display vertical pixels per division (200 px ÷ 8 div = 25 px/div).
+pub const PIXELS_PER_DIV: f64 = 25.0;
+
+// ── Capture struct ────────────────────────────────────────────────────────
 ///
 /// Sample values are raw 8-bit ADC counts (0..=255).
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -96,7 +107,7 @@ pub fn parse_captures(data: &[u8]) -> Result<Vec<Capture>, ParseError> {
         // screenshot data (low value = top of screen = positive voltage),
         // matching what was already done for CH2 below.
         let ch1: Vec<u8> = decode_ascii_samples(&data[ch1_body..ch1_end])
-            .into_iter().map(|v| 255 - v).collect();
+            .into_iter().map(|v| ADC_VALUE_MAX - v).collect();
 
         // Check whether the next boundary is a CH2 within the same capture.
         let mut next_cursor = ch1_end;
@@ -106,7 +117,7 @@ pub fn parse_captures(data: &[u8]) -> Result<Vec<Capture>, ParseError> {
             // CH2 uses the same screen-coordinate convention as CH1 and screenshot data:
             // low value = near top of screen = positive voltage.
             let samples: Vec<u8> = decode_ascii_samples(&data[ch2_body..ch2_end])
-                .into_iter().map(|v| 255 - v).collect();
+                .into_iter().map(|v| ADC_VALUE_MAX - v).collect();
             next_cursor = ch2_end;
             Some(samples)
         } else {
@@ -153,9 +164,9 @@ pub fn looks_like_dump_start(data: &[u8]) -> bool {
 /// (volt-scale, probe mode, zero offset). Callers that have access to the
 /// settings buffer can substitute their own conversion.
 pub fn adc_to_normalized(byte: u8) -> f32 {
-    // Match ZeeTweak: y_screen = 255 - raw; center = 128.
-    let centered = (255i16 - byte as i16) - 128;
-    centered as f32 / 128.0
+    // Match ZeeTweak: y_screen = ADC_VALUE_MAX - raw; center = ADC_VALUE_MID.
+    let centered = (ADC_VALUE_MAX as i16 - byte as i16) - ADC_VALUE_MID as i16;
+    centered as f32 / ADC_VALUE_MID as f32
 }
 
 // ---------- internals ----------
@@ -210,7 +221,7 @@ fn decode_ascii_samples(body: &[u8]) -> Vec<u8> {
             // Terminators that complete a token.
             b' ' | 0x00 | b'\r' | b'\n' | b'\t' => {
                 if have_digit {
-                    if acc <= 255 {
+                    if acc <= ADC_VALUE_MAX as u32 {
                         out.push(acc as u8);
                     }
                     acc = 0;
@@ -224,7 +235,7 @@ fn decode_ascii_samples(body: &[u8]) -> Vec<u8> {
             }
         }
     }
-    if have_digit && acc <= 255 {
+    if have_digit && acc <= ADC_VALUE_MAX as u32 {
         out.push(acc as u8);
     }
     out

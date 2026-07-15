@@ -59,7 +59,10 @@ yellow CH1, cyan CH2. Renders:
 * Green thin lines for **device cursors** (data-supplied, read-only) with
   numeric labels (sample numbers for X, voltage for Y).
 * Optional **axis scales** toggled via "Show scales" setting. Scale values
-  are derived from user-configurable V/div and time/div parameters.
+  are derived from user-configurable V/div and time/div parameters:
+  top grid line = V/off + 4×V/div, center = V/off, bottom = V/off − 4×V/div.
+  V/off affects voltage labels and cursor measurements. The trace Y-position
+  uses the device pixel density (25): `y = v / 200 × height`.
 
 ### 3. Measurement panel (right, 220 px)
 Vertical column inside a rounded container.
@@ -72,8 +75,18 @@ Vertical column inside a rounded container.
 
 These values drive all voltage/time calculations throughout the panel and
 graph scales. The oscilloscope screen has 8 vertical and 12 horizontal divs.
-When a capture arrives via the screenshot protocol, V/div and V/offset are
-**automatically filled** from CH1/CH2 packet metadata separately.
+When capture metadata includes probe-mode information (×1, ×10, ×100), a
+**Probe:** row is shown beneath V/div, and probe + coupling info appear in the
+Trigger section.
+
+When a capture arrives via the **screenshot protocol** (live), V/div, V/offset
+and t/div are **automatically filled** from the packet's embedded settings
+metadata. The same auto-population applies when **switching between captures**
+in the thumbnail strip — clicking a screenshot capture applies its `scope_state`
+settings. For single-capture `.zwcap` or `.bin` files, settings are applied
+automatically on load. For multi-capture files, select the desired capture
+from the thumbnails to apply its settings. ASCII dumps (without metadata)
+retain the last-used settings.
 
 **Signal information** (shown when a capture is loaded):
 * Voltage range for CH1/CH2 (computed from V/div × 8 divs, centered at 0).
@@ -223,8 +236,10 @@ Default level: info; override with `RUST_LOG`.
 * ADC 0..255 uses screen-coordinate convention (0 = top of screen ≈ +5 V,
   127/128 = 0 V, 255 = bottom of screen ≈ −5 V). This is consistent across
   both debug-dump and screenshot data paths.
-* Scale labels are derived from V/div and V/offset settings:
-  - Top of graph = V/offset + 4×V/div
-  - Bottom of graph = V/offset − 4×V/div
+* Voltage uses the device-calibrated formula:
+  `V = V_offset + (127 − v) × V/div / 25`
+  where `v` = screen-coordinate ADC value (0 = top, 255 = bottom) and
+  25 = pixels per division. This matches the DSO3D12's own `pixel_to_volts`.
 * Time axis = 12 divisions × t/div (ms).
-* When receiving screenshot packets, these are auto-filled from device metadata.
+* When receiving screenshot packets or loading `.zwcap` files with metadata,
+  V/div, V/offset, t/div and probe mode are auto-filled from device metadata.

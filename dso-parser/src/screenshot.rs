@@ -21,7 +21,7 @@
 //!
 //! DSO2512G firmware uses slightly different field offsets (see [`DeviceVariant`]).
 
-use crate::{Capture, ParseError};
+use crate::{ADC_VALUE_MAX, ADC_VALUE_MID, Capture, ParseError, PIXELS_PER_DIV};
 
 /// Which firmware / hardware variant we're parsing.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -231,10 +231,10 @@ pub struct ChannelSettings {
 impl ChannelSettings {
     /// Converts a raw (inverted) ADC pixel value to voltage in volts.
     pub fn pixel_to_volts(&self, raw: u8) -> f64 {
-        let pixel_val = (255 - raw) as f64;
-        let vpp = self.volt_scale_uv as f64 / 25.0 / 1_000_000.0;
+        let pixel_val = (ADC_VALUE_MAX - raw) as f64;
+        let vpp = self.volt_scale_uv as f64 / PIXELS_PER_DIV / 1_000_000.0;
         let multiplier = 10f64.powi(self.probe_mode as i32);
-        (pixel_val - 128.0 - self.zero_volt_pixels as f64) * vpp * multiplier
+        (pixel_val - ADC_VALUE_MID as f64 - self.zero_volt_pixels as f64) * vpp * multiplier
     }
 
     pub fn vdiv_str(&self) -> String {
@@ -293,7 +293,7 @@ pub struct OscSettings {
 impl OscSettings {
     /// Time per pixel in seconds (timebase_ns / 25 / 1e9).
     pub fn time_per_pixel_s(&self) -> f64 {
-        self.timebase_ns_per_div as f64 / 25.0 / 1e9
+        self.timebase_ns_per_div as f64 / PIXELS_PER_DIV / 1e9
     }
 
     pub fn timebase_label(&self) -> &'static str {
@@ -438,8 +438,8 @@ impl ScreenshotPacket {
             let ch1_min_v = self.settings.ch1.pixel_to_volts(self.ch1_min[i]);
             let ch1_max_v = self.settings.ch1.pixel_to_volts(self.ch1_max[i]);
             let ch2 = if self.settings.ch2.enabled {
-                let mn = self.ch2_min.as_ref().map(|a| a[i]).unwrap_or(128);
-                let mx = self.ch2_max.as_ref().map(|a| a[i]).unwrap_or(128);
+                let mn = self.ch2_min.as_ref().map(|a| a[i]).unwrap_or(ADC_VALUE_MID);
+                let mx = self.ch2_max.as_ref().map(|a| a[i]).unwrap_or(ADC_VALUE_MID);
                 Some((
                     self.settings.ch2.pixel_to_volts(mn),
                     self.settings.ch2.pixel_to_volts(mx),
@@ -503,8 +503,8 @@ impl ScreenshotPacket {
         out.push_str(&format!("  V/Div          : {}/div (index {})\n",
             s.ch1.vdiv_str(), s.ch1.vdiv_index));
         out.push_str(&format!("  Volt scale     : {} µV/px ({}/pixel)\n",
-            s.ch1.volt_scale_uv as f64 / 25.0,
-            format_uv((s.ch1.volt_scale_uv as f64 / 25.0) as i64, 0)));
+            s.ch1.volt_scale_uv as f64 / PIXELS_PER_DIV,
+            format_uv((s.ch1.volt_scale_uv as f64 / PIXELS_PER_DIV) as i64, 0)));
         out.push_str(&format!("  Zero V (pixels): {} px\n", s.ch1.zero_volt_pixels));
         out.push_str(&format!("  Zero V (µV)    : {}\n",
             format_uv(s.ch1.zero_volt_uv, 0)));
@@ -519,7 +519,7 @@ impl ScreenshotPacket {
             out.push_str(&format!("  V/Div          : {}/div (index {})\n",
                 s.ch2.vdiv_str(), s.ch2.vdiv_index));
             out.push_str(&format!("  Volt scale     : {} µV/px\n",
-                s.ch2.volt_scale_uv as f64 / 25.0));
+                s.ch2.volt_scale_uv as f64 / PIXELS_PER_DIV));
             out.push_str(&format!("  Zero V (pixels): {} px\n", s.ch2.zero_volt_pixels));
             out.push_str(&format!("  Zero V (µV)    : {}\n",
                 format_uv(s.ch2.zero_volt_uv, 0)));
@@ -543,7 +543,7 @@ impl ScreenshotPacket {
         }
         if s.cursors_y_enable {
             let act_ch = if s.active_channel == 0 { &s.ch1 } else { &s.ch2 };
-            let uv_per_px = act_ch.volt_scale_uv as f64 / 25.0;
+            let uv_per_px = act_ch.volt_scale_uv as f64 / PIXELS_PER_DIV;
             let dy_px = (s.cursor_y2 - s.cursor_y1).abs() as f64;
             let dy_uv = (dy_px * uv_per_px) as i64;
             let y1_uv = (s.cursor_y1 as f64 * uv_per_px) as i64;
@@ -943,8 +943,8 @@ mod tests {
             probe_mode: 0,
             enabled_measurements: 0,
         };
-        // raw=128 → pixel_val=127 → (127-128-0)*scale = -1 × (100000/25/1e6) ≈ -4mV
-        let v = ch.pixel_to_volts(128);
+        // raw=ADC_VALUE_MID → pixel_val=127 → (127-128-0)*scale = -1 × (100000/25/1e6) ≈ -4mV
+        let v = ch.pixel_to_volts(ADC_VALUE_MID);
         assert!((v - -0.004).abs() < 1e-6, "v={v}");
     }
 }

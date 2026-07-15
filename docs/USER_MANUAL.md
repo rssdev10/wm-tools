@@ -47,7 +47,10 @@ channel. Use `V/div` and `t/div` in the Measurement panel to set the scale.
    binary packet** containing the 300 display pixels plus all instrument settings.
 
 The app detects this packet by its size and decodes the embedded calibration
-data to set `V/div` and `t/div` automatically.
+data to set `V/div`, `V/off`, `t/div` and **probe mode** (×1, ×10, ×100)
+automatically. Probe and coupling info are shown in the Measurement panel's
+Trigger section, and the probe multiplier is reflected in the displayed V/div
+and V/off values.
 
 Use the `capture` CLI tool to capture and analyze screenshot packets from the
 command line (see [CLI tools](#cli-tools) below).
@@ -59,8 +62,16 @@ Re-plug and the connection resumes without manual intervention.
 
 ## Loading captures from files
 
-Click **Load Capture** and select a `.bin` / `.dat` / `.raw` file previously
-saved from the device. Files can contain one or many consecutive captures.
+Click **Load Capture** and select a `.zwcap`, `.bin`, `.dat` or `.raw` file.
+Files can contain one or many consecutive captures.
+
+When loading files that contain embedded instrument metadata (`.zwcap` files
+or screenshot `.bin` files), the **V/div**, **V/off** and **t/div** settings
+are **automatically populated** from the capture data. You can still adjust
+them manually if needed.
+
+When switching between captures in the thumbnail strip, the scale settings
+update automatically for each capture that has embedded metadata.
 
 ## Viewing the graph
 

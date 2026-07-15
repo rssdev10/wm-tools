@@ -69,6 +69,9 @@ pub struct ScopeState {
     pub cursor_y1_frac: f64,
     /// Cursor Y2 position as fraction 0.0–1.0 of graph height.
     pub cursor_y2_frac: f64,
+    /// Active channel (0 = CH1, 1 = CH2). Used for device cursor voltage.
+    #[serde(default)]
+    pub active_channel: u8,
 }
 
 /// Per-channel state.
@@ -156,7 +159,7 @@ pub fn is_zwcap(data: &[u8]) -> bool {
 // ── Conversion helpers ─────────────────────────────────────────────────────
 
 use crate::screenshot::{self, ScreenshotPacket};
-use crate::Capture;
+use crate::{ADC_VALUE_MAX, ADC_VALUE_MID, Capture, PIXELS_PER_DIV};
 
 /// Convert an ASCII debug dump `Capture` into a `CaptureRecord`.
 pub fn capture_to_record(
@@ -221,8 +224,8 @@ pub fn screenshot_to_record(
     // Cursor fractions: device uses pixel offsets from center (150 for X, 128 for Y)
     let cx1 = (s.cursor_x1 as f64 + 150.0) / 300.0;
     let cx2 = (s.cursor_x2 as f64 + 150.0) / 300.0;
-    let cy1 = (s.cursor_y1 as f64 + 128.0) / 256.0;
-    let cy2 = (s.cursor_y2 as f64 + 128.0) / 256.0;
+    let cy1 = (s.cursor_y1 as f64 + ADC_VALUE_MID as f64) / 256.0;
+    let cy2 = (s.cursor_y2 as f64 + ADC_VALUE_MID as f64) / 256.0;
 
     let scope_state = ScopeState {
         timebase_label: s.timebase_label().to_string(),
@@ -246,6 +249,7 @@ pub fn screenshot_to_record(
         cursor_x2_frac: cx2.clamp(0.0, 1.0),
         cursor_y1_frac: cy1.clamp(0.0, 1.0),
         cursor_y2_frac: cy2.clamp(0.0, 1.0),
+        active_channel: s.active_channel,
     };
 
     let mut waveforms = vec![Waveform::DisplayEnvelope {
@@ -253,7 +257,7 @@ pub fn screenshot_to_record(
         min_counts: pkt.ch1_min.to_vec(),
         max_counts: pkt.ch1_max.to_vec(),
         time_per_pixel_s: Some(s.time_per_pixel_s()),
-        volts_per_pixel: Some(s.ch1.volt_scale_uv as f64 / 25.0),
+        volts_per_pixel: Some(s.ch1.volt_scale_uv as f64 / PIXELS_PER_DIV),
         zero_pixel: Some(s.ch1.zero_volt_pixels as i16),
     }];
     if let (Some(mn), Some(mx)) = (&pkt.ch2_min, &pkt.ch2_max) {
@@ -262,7 +266,7 @@ pub fn screenshot_to_record(
             min_counts: mn.to_vec(),
             max_counts: mx.to_vec(),
             time_per_pixel_s: Some(s.time_per_pixel_s()),
-            volts_per_pixel: Some(s.ch2.volt_scale_uv as f64 / 25.0),
+            volts_per_pixel: Some(s.ch2.volt_scale_uv as f64 / PIXELS_PER_DIV),
             zero_pixel: Some(s.ch2.zero_volt_pixels as i16),
         });
     }
@@ -334,15 +338,15 @@ pub fn record_to_capture(rec: &CaptureRecord) -> Capture {
             for w in &rec.waveforms {
                 match w {
                     Waveform::RawSamples { channel: 1, counts, .. } => {
-                        let mut raw: Vec<u8> = counts.iter().map(|&c| c.clamp(0, 255) as u8).collect();
+                        let mut raw: Vec<u8> = counts.iter().map(|&c| c.clamp(0, ADC_VALUE_MAX as i16) as u8).collect();
                         // Old-format: CH1 stored in raw-ADC convention → invert to match.
                         if old_ascii {
-                            raw.iter_mut().for_each(|v| *v = 255 - *v);
+                            raw.iter_mut().for_each(|v| *v = ADC_VALUE_MAX - *v);
                         }
                         ch1 = raw;
                     }
                     Waveform::RawSamples { channel: 2, counts, .. } => {
-                        ch2 = Some(counts.iter().map(|&c| c.clamp(0, 255) as u8).collect());
+                        ch2 = Some(counts.iter().map(|&c| c.clamp(0, ADC_VALUE_MAX as i16) as u8).collect());
                     }
                     _ => {}
                 }
