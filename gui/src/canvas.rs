@@ -1,5 +1,6 @@
 //! Oscilloscope-style graph canvas (iced::widget::canvas).
 
+use crate::app::{format_duration_ms_scale};
 use crate::settings::ViewMode;
 use dso_parser::{ADC_VALUE_MAX, ADC_VALUE_MID, Capture};
 use iced::widget::canvas::{self, Frame, Geometry, Path, Stroke, Text};
@@ -235,21 +236,13 @@ impl<Message: Clone> canvas::Program<Message> for Scope<'_, Message> {
             let total_time_ms = T_CELLS as f64 * self.t_per_div_ms;
             let fmt_time = |frac: f32| -> String {
                 let t_ms = frac as f64 * total_time_ms;
-                if t_ms >= 1.0 {
-                    format!("{:.1}ms", t_ms)
-                } else {
-                    format!("{:.0}µs", t_ms * 1000.0)
-                }
+                format_duration_ms_scale(t_ms)
             };
             frame.fill_text(dev_label(fmt_time(a), Point::new(a.clamp(0.0, 1.0) * w + 2.0, 12.0)));
             frame.fill_text(dev_label(fmt_time(b), Point::new(b.clamp(0.0, 1.0) * w + 2.0, 12.0)));
             // Also show Δt between cursors.
             let dt_ms = (b - a).abs() as f64 * total_time_ms;
-            let dt_label = if dt_ms >= 1.0 {
-                format!("Δt={:.1}ms", dt_ms)
-            } else {
-                format!("Δt={:.0}µs", dt_ms * 1000.0)
-            };
+            let dt_label = format!("Δt={}", format_duration_ms_scale(dt_ms));
             frame.fill_text(dev_label(dt_label, Point::new(4.0, 22.0)));
         }
         if let Some((a, b)) = self.device_cursor_y {
@@ -366,11 +359,7 @@ fn draw_scales(
         let frac = i as f64 / cols as f64;
         let time_ms = frac * total_time_ms;
         let x = i as f32 * dx;
-        let content = if time_ms >= 1.0 {
-            format!("{time_ms:.1}ms")
-        } else {
-            format!("{:.0}µs", time_ms * 1000.0)
-        };
+        let content = format_duration_ms_scale(time_ms);
         let label = Text {
             content,
             position: Point::new(x + 2.0, size.height - 12.0),

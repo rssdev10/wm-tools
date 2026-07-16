@@ -2113,13 +2113,24 @@ fn format_float(v: f64) -> String {
 
 /// Format a time duration given in milliseconds into a human-readable string
 /// with automatic unit switching (ms / µs / ns).
-fn format_duration_ms(ms: f64) -> String {
+pub fn format_duration_ms(ms: f64) -> String {
     if ms >= 1.0 {
         format!("{ms:.3} ms")
     } else if ms >= 0.001 {
         format!("{:.3} µs", ms * 1000.0)
     } else {
         format!("{:.3} ns", ms * 1_000_000.0)
+    }
+}
+
+/// Compact variant for scale labels: ms with 0.1 precision, µs/ns with .0.
+pub fn format_duration_ms_scale(ms: f64) -> String {
+    if ms >= 1.0 {
+        format!("{ms:.1}ms")
+    } else if ms >= 0.001 {
+        format!("{:.0}µs", ms * 1000.0)
+    } else {
+        format!("{:.0}ns", ms * 1_000_000.0)
     }
 }
 
@@ -2559,12 +2570,14 @@ fn export_png(path: &std::path::Path, cap: &Capture, settings: &Settings) -> any
             for i in 0..=cols {
                 let frac = i as f64 / cols as f64;
                 let time_ms = frac * total_time_ms;
-                let label = if time_ms >= 1.0 {
-                    format!("{time_ms:.1}")
+                let label = format_duration_ms_scale(time_ms);
+                // Position: for i=0 left-aligned, for i=cols right-aligned
+                // so the last label doesn't overflow past the graph edge.
+                let x_pos = if i == cols && label.len() > 3 {
+                    x_off + w - (label.len() as u32 * 4)
                 } else {
-                    format!("{:.0}u", time_ms * 1000.0)
+                    x_off + i * w / cols + 2
                 };
-                let x_pos = x_off + i * w / cols + 2;
                 let y_pos = y_off + h + 2;
                 draw_text_tiny(pixels, width, height, &label, x_pos, y_pos, PNG_SCALE_TEXT);
             }
@@ -2804,6 +2817,10 @@ fn tiny_glyph(ch: char) -> [u8; 5] {
         '.' => [0b000, 0b000, 0b000, 0b000, 0b010],
         '-' => [0b000, 0b000, 0b111, 0b000, 0b000],
         'V' => [0b101, 0b101, 0b101, 0b101, 0b010],
+        'm' => [0b000, 0b110, 0b101, 0b101, 0b101],
+        's' => [0b011, 0b100, 0b010, 0b001, 0b110],
+        'n' => [0b000, 0b110, 0b101, 0b101, 0b101],
+        'µ' => [0b000, 0b101, 0b101, 0b111, 0b100],
         ' ' => [0b000, 0b000, 0b000, 0b000, 0b000],
         _ => [0b000, 0b000, 0b000, 0b000, 0b000],
     }
