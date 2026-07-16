@@ -8,7 +8,6 @@ pub struct Settings {
     /// Last-used serial port (persisted as default for next launch).
     pub serial_port: Option<String>,
     pub baud_rate: u32,
-    pub show_instructions: bool,
     pub show_ch1: bool,
     pub show_ch2: bool,
     /// Show user-controlled measurement cursors on the X axis.
@@ -46,6 +45,9 @@ pub struct Settings {
     /// Voltage offset for CH2 (zero-level of graph) in volts. Default 0.0 V.
     #[serde(default)]
     pub v_offset_ch2: f64,
+    /// Selected UI language code (e.g. "en", "ru", "es", "zh", "hi").
+    #[serde(default = "default_language")]
+    pub language: String,
     /// Last window size (width, height) in logical pixels.
     #[serde(default = "default_window_size")]
     pub window_size: (f32, f32),
@@ -57,6 +59,10 @@ fn default_v_per_div() -> f64 {
 
 fn default_t_per_div_ms() -> f64 {
     1.0
+}
+
+fn default_language() -> String {
+    "en".to_string()
 }
 
 fn default_window_size() -> (f32, f32) {
@@ -76,11 +82,11 @@ impl ViewMode {
 
 impl std::fmt::Display for ViewMode {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(match self {
-            ViewMode::Line => "Line",
-            ViewMode::Dot => "Dot",
-            ViewMode::Smooth => "Smooth",
-        })
+        match self {
+            ViewMode::Line => write!(f, "{}", crate::i18n::t!("label.view_mode_line")),
+            ViewMode::Dot => write!(f, "{}", crate::i18n::t!("label.view_mode_dot")),
+            ViewMode::Smooth => write!(f, "{}", crate::i18n::t!("label.view_mode_smooth")),
+        }
     }
 }
 
@@ -89,7 +95,6 @@ impl Default for Settings {
         Self {
             serial_port: None,
             baud_rate: 115200,
-            show_instructions: true,
             show_ch1: true,
             show_ch2: true,
             measurement_cursor_x_enabled: false,
@@ -108,6 +113,7 @@ impl Default for Settings {
             t_per_div_ms: 1.0,
             v_offset_ch1: 0.0,
             v_offset_ch2: 0.0,
+            language: default_language(),
             window_size: default_window_size(),
         }
     }

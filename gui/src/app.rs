@@ -13,6 +13,7 @@ use iced::widget::{
 use iced::{Element, Length, Subscription, Task, Theme};
 
 use crate::canvas::{Scope, T_CELLS, Thumbnail, V_CELLS};
+use crate::i18n::t;
 use crate::range_slider;
 use crate::serial::{self, SerialConfig, SerialEvent, SerialHandle};
 use crate::settings::{Settings, ViewMode};
@@ -60,7 +61,6 @@ pub enum Message {
     // Graph click — move nearest cursor
     GraphClicked(f32, f32),
     // Misc
-    ToggleInstructions(bool),
     OpenInstructions,
     CloseInstructions,
     ToggleAlertOnData(bool),
@@ -80,6 +80,8 @@ pub enum Message {
     FirmwareConfirmStart,
     FirmwareStart,
     FirmwareEvent(#[allow(dead_code)] crate::flash::FlashEvent),
+    // Language selection
+    ChangeLanguage(String),
     // Port scan tick (auto-refresh)
     PortScanTick,
     // Window resized
@@ -112,6 +114,19 @@ pub struct CaptureEntry {
 pub struct LoadedDump {
     pub path: PathBuf,
     pub captures: Vec<CaptureEntry>,
+}
+
+/// Wrapper for language display in pick_list.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct LangOption {
+    code: String,
+    display: String,
+}
+
+impl std::fmt::Display for LangOption {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.display)
+    }
 }
 
 // ── State ──────────────────────────────────────────────────────────────────
@@ -184,7 +199,7 @@ impl App {
                 settings,
                 dump: None,
                 current: 0,
-                status: "Ready.".to_string(),
+                status: t!("app.ready").to_string(),
                 available_ports: ports,
                 listening: false,
                 serial_handle: None,
@@ -220,12 +235,13 @@ impl App {
         let ver = env!("CARGO_PKG_VERSION");
         match &self.dump {
             Some(d) => format!(
-                "DSO3D12 Viewer v{ver} — {} ({} capture{})",
+                "{} v{ver} — {} ({} {})",
+                t!("app.title"),
                 d.path.file_name().and_then(|s| s.to_str()).unwrap_or("?"),
                 d.captures.len(),
-                if d.captures.len() == 1 { "" } else { "s" }
+                if d.captures.len() == 1 { "capture" } else { "captures" }
             ),
-            None => format!("DSO3D12 Viewer v{ver}"),
+            None => format!("{} v{ver}", t!("app.title")),
         }
     }
 
@@ -315,12 +331,9 @@ impl App {
             Message::Loaded(Ok(d)) => {
                 self.deleted_capture = None;
                 self.deleted_at = None;
-                self.status = format!(
-                    "Loaded {} capture{} from {}",
-                    d.captures.len(),
-                    if d.captures.len() == 1 { "" } else { "s" },
-                    d.path.display()
-                );
+                let n = d.captures.len();
+                let path_s = d.path.display().to_string();
+                self.status = t!("label.loaded_ok", n = n, path = path_s).to_string();
                 log::info!("{}", self.status);
                 self.current = 0;
                 self.dump = Some(d);
@@ -338,7 +351,7 @@ impl App {
                 Task::none()
             }
             Message::Loaded(Err(e)) => {
-                self.status = format!("Load error: {e}");
+                self.status = t!("label.load_error", e = format!("{e}")).to_string();
                 log::error!("load error: {e}");
                 Task::none()
             }
@@ -349,9 +362,9 @@ impl App {
             Message::SaveCapturePicked(Some(path)) => {
                 if let Some(dump) = &self.dump {
                     match save_all_captures(&path, &dump.captures) {
-                        Ok(()) => self.status = format!("Saved {} capture(s) to {}", dump.captures.len(), path.display()),
+                        Ok(()) => self.status = t!("label.saved_ok", n = dump.captures.len(), path = path.display().to_string()).to_string(),
                         Err(e) => {
-                            self.status = format!("Save error: {e}");
+                            self.status = t!("label.save_error", e = format!("{e}")).to_string();
                             log::error!("save error: {e}");
                         }
                     }
@@ -366,14 +379,14 @@ impl App {
             Message::PngPathPicked(Some(path)) => {
                 if let Some(cap) = self.current_capture().cloned() {
                     match export_png(&path, &cap, &self.settings) {
-                        Ok(()) => self.status = format!("PNG saved to {}", path.display()),
+                        Ok(()) => self.status = t!("label.png_saved", path = path.display().to_string()).to_string(),
                         Err(e) => {
-                            self.status = format!("PNG error: {e}");
+                            self.status = t!("label.png_error", e = format!("{e}")).to_string();
                             log::error!("PNG error: {e}");
                         }
                     }
                 } else {
-                    self.status = "No capture to export.".to_string();
+                    self.status = t!("app.no_capture").to_string();
                 }
                 Task::none()
             },
@@ -385,9 +398,9 @@ impl App {
             Message::ExportCsvPicked(Some(path)) => {
                 if let Some(cap) = self.current_capture() {
                     match export_csv(&path, cap) {
-                        Ok(()) => self.status = format!("Wrote {}", path.display()),
+                        Ok(()) => self.status = t!("label.csv_written", path = path.display().to_string()).to_string(),
                         Err(e) => {
-                            self.status = format!("CSV error: {e}");
+                            self.status = t!("label.csv_error", e = format!("{e}")).to_string();
                             log::error!("CSV error: {e}");
                         }
                     }
@@ -420,7 +433,7 @@ impl App {
                 let port = match &self.settings.serial_port {
                     Some(p) if !p.is_empty() => p.clone(),
                     _ => {
-                        self.status = "Select a serial port first.".to_string();
+                        self.status = t!("app.select_port").to_string();
                         return Task::none();
                     }
                 };
@@ -434,7 +447,8 @@ impl App {
                 self.serial_rx = Some(rx);
                 self.listening = true;
                 self.capture_progress = 0;
-                self.status = format!("Listening on {}…", self.settings.serial_port.as_deref().unwrap_or("?"));
+                let port = self.settings.serial_port.as_deref().unwrap_or("?").to_string();
+                self.status = t!("label.listening_on", port = port).to_string();
                 Task::none()
             }
             Message::StopListening => {
@@ -443,7 +457,7 @@ impl App {
                 }
                 self.serial_rx = None;
                 self.listening = false;
-                self.status = "Stopped.".to_string();
+                self.status = t!("label.stopped").to_string();
                 Task::none()
             }
             Message::SerialEvent(_) => {
@@ -452,14 +466,12 @@ impl App {
                     while let Ok(evt) = rx.try_recv() {
                         match evt {
                             SerialEvent::Connected => {
-                                self.status = format!(
-                                    "Connected to {}.",
-                                    self.settings.serial_port.as_deref().unwrap_or("?")
-                                );
+                                let port = self.settings.serial_port.as_deref().unwrap_or("?").to_string();
+                                self.status = t!("label.connected_to", port = port).to_string();
                                 log::info!("{}", self.status);
                             }
                             SerialEvent::Disconnected => {
-                                self.status = "Port disconnected; reconnecting…".to_string();
+                                self.status = t!("label.disconnected").to_string();
                                 log::warn!("{}", self.status);
                             }
                             SerialEvent::Progress(n) => {
@@ -469,7 +481,7 @@ impl App {
                                         play_beep_start();
                                     }
                                     self.capture_progress = n;
-                                    self.status = format!("Receiving… {n} bytes");
+                                    self.status = t!("label.receiving", n = n).to_string();
                                 }
                             }
                             SerialEvent::CaptureReceived(captures) => {
@@ -507,10 +519,8 @@ impl App {
                                 self.capture_progress = 0;
                                 self.deleted_capture = None;
                                 self.deleted_at = None;
-                                self.status = format!(
-                                    "Received {count} capture(s). Total: {}",
-                                    self.dump.as_ref().map(|d| d.captures.len()).unwrap_or(0)
-                                );
+                                let total = self.dump.as_ref().map(|d| d.captures.len()).unwrap_or(0);
+                                self.status = t!("label.received_captures", count = count, total = total).to_string();
                             }
                             SerialEvent::ScreenshotReceived(raw_bytes) => {
                                 log::info!("received screenshot packet ({} bytes)", raw_bytes.len());
@@ -555,26 +565,23 @@ impl App {
                                         self.capture_progress = 0;
                                         self.deleted_capture = None;
                                         self.deleted_at = None;
-                                        self.status = format!(
-                                            "Screenshot received (CH1: {}/div, CH2: {}/div, {}/div). Total: {}",
-                                            dso_parser::format_uv(
-                                                (self.settings.v_per_div_ch1 * 1_000_000.0) as i64, 0
-                                            ),
-                                            dso_parser::format_uv(
-                                                (self.settings.v_per_div_ch2 * 1_000_000.0) as i64, 0
-                                            ),
-                                            s.timebase_label(),
-                                            self.dump.as_ref().map(|d| d.captures.len()).unwrap_or(0)
-                                        );
+                                        let total = self.dump.as_ref().map(|d| d.captures.len()).unwrap_or(0);
+                                        self.status = t!("label.screenshot_received",
+                                            ch1 = dso_parser::format_uv((self.settings.v_per_div_ch1 * 1_000_000.0) as i64, 0),
+                                            ch2 = dso_parser::format_uv((self.settings.v_per_div_ch2 * 1_000_000.0) as i64, 0),
+                                            timebase = s.timebase_label(),
+                                            total = total,
+                                        ).to_string();
                                     }
                                     Err(e) => {
-                                        self.status = format!("Screenshot parse error: {e}");
+                                        self.status = t!("label.load_error", e = format!("{e}")).to_string();
                                         log::error!("screenshot parse: {e}");
                                     }
                                 }
                             }
                             SerialEvent::Error(e) => {
                                 self.status = format!("Serial: {e}");
+                                // Not translated — raw device error message
                                 log::error!("serial error: {e}");
                             }
                         }
@@ -701,11 +708,6 @@ impl App {
                 }
                 Task::none()
             }
-            Message::ToggleInstructions(v) => {
-                self.settings.show_instructions = v;
-                self.settings.save();
-                Task::none()
-            }
             Message::OpenInstructions => {
                 self.show_instructions = true;
                 Task::none()
@@ -731,7 +733,7 @@ impl App {
                 self.settings.serial_port = if p.is_empty() { None } else { Some(p) };
                 self.settings.save();
                 self.show_settings = false;
-                self.status = "Settings saved.".to_string();
+                self.status = t!("app.settings_saved").to_string();
                 Task::none()
             }
             Message::SettingsBaudChanged(s) => {
@@ -760,6 +762,13 @@ impl App {
             Message::ToggleAutoListen(v) => {
                 self.settings.auto_listen = v;
                 self.settings.save();
+                Task::none()
+            }
+            Message::ChangeLanguage(l) => {
+                log::info!("language -> {l}");
+                self.settings.language = l;
+                self.settings.save();
+                crate::i18n::set_language(&self.settings.language);
                 Task::none()
             }
             Message::PortScanTick => {
@@ -792,7 +801,7 @@ impl App {
                         if self.current >= dump.captures.len() && self.current > 0 {
                             self.current -= 1;
                         }
-                        self.status = format!("Deleted capture #{}. Press Undo to restore.", idx + 1);
+                        self.status = t!("label.deleted", n = idx + 1).to_string();
                     }
                 }
                 Task::none()
@@ -807,7 +816,7 @@ impl App {
                     let insert_at = idx.min(dump.captures.len());
                     dump.captures.insert(insert_at, entry);
                     self.current = insert_at;
-                    self.status = format!("Restored capture #{}.", insert_at + 1);
+                    self.status = t!("label.restored", n = insert_at + 1).to_string();
                 }
                 Task::none()
             }
@@ -818,7 +827,7 @@ impl App {
                         self.deleted_at = None;
                         // Clear the status hint only if it still mentions undo
                         if self.status.contains("Undo") {
-                            self.status = "Undo expired.".to_string();
+                            self.status = t!("label.undo_expired").to_string();
                         }
                     }
                 }
@@ -839,8 +848,8 @@ impl App {
                 let idx = self.context_export_idx.take().unwrap_or(self.current);
                 if let Some(cap) = self.dump.as_ref().and_then(|d| d.captures.get(idx)).map(|e| &e.capture).cloned() {
                     match export_png(&path, &cap, &self.settings) {
-                        Ok(()) => self.status = format!("PNG saved to {}", path.display()),
-                        Err(e) => self.status = format!("PNG error: {e}"),
+                        Ok(()) => self.status = t!("label.png_saved", path = path.display().to_string()).to_string(),
+                        Err(e) => self.status = t!("label.png_error", e = format!("{e}")).to_string(),
                     }
                 }
                 Task::none()
@@ -860,8 +869,8 @@ impl App {
                 let idx = self.context_export_idx.take().unwrap_or(self.current);
                 if let Some(cap) = self.dump.as_ref().and_then(|d| d.captures.get(idx)).map(|e| &e.capture) {
                     match export_csv(&path, cap) {
-                        Ok(()) => self.status = format!("CSV saved to {}", path.display()),
-                        Err(e) => self.status = format!("CSV error: {e}"),
+                        Ok(()) => self.status = t!("label.csv_written", path = path.display().to_string()).to_string(),
+                        Err(e) => self.status = t!("label.csv_error", e = format!("{e}")).to_string(),
                     }
                 }
                 Task::none()
@@ -871,7 +880,7 @@ impl App {
                 self.firmware_port = self.settings.serial_port.clone().unwrap_or_default();
                 self.firmware_file = None;
                 self.firmware_progress = None;
-                self.firmware_status = "Select firmware file and port, then click Update.".to_string();
+                self.firmware_status = t!("label.firmware_status_ready").to_string();
                 self.firmware_handle = None;
                 self.firmware_rx = None;
                 self.firmware_confirming = false;
@@ -912,7 +921,7 @@ impl App {
             }
             Message::FirmwareConfirmStart => {
                 self.firmware_confirming = true;
-                self.firmware_status = "⚠ Are you sure? This may brick the device. Click Update again to confirm.".to_string();
+                self.firmware_status = t!("label.firmware_confirm").to_string();
                 Task::none()
             }
             Message::FirmwareStart => {
@@ -921,12 +930,12 @@ impl App {
                 let file = match &self.firmware_file {
                     Some(p) => p.to_string_lossy().to_string(),
                     None => {
-                        self.firmware_status = "No firmware file selected.".to_string();
+                        self.firmware_status = t!("label.firmware_no_file").to_string();
                         return Task::none();
                     }
                 };
                 if port.is_empty() {
-                    self.firmware_status = "No port selected.".to_string();
+                    self.firmware_status = t!("label.firmware_no_port").to_string();
                     return Task::none();
                 }
                 // Stop listening if active (can't share port)
@@ -942,7 +951,7 @@ impl App {
                 self.firmware_handle = Some(handle);
                 self.firmware_rx = Some(rx);
                 self.firmware_progress = Some((0, 1));
-                self.firmware_status = "Starting…".to_string();
+                self.firmware_status = t!("label.firmware_starting").to_string();
                 Task::none()
             }
             Message::FirmwareEvent(_) => {
@@ -962,10 +971,10 @@ impl App {
                             crate::flash::FlashEvent::Finished(result) => {
                                 match result {
                                     Ok(()) => {
-                                        self.firmware_status = "Flash complete! You may close this dialog.".to_string();
+                                        self.firmware_status = t!("label.firmware_complete").to_string();
                                     }
                                     Err(e) => {
-                                        self.firmware_status = format!("Flash error: {e}");
+                                        self.firmware_status = t!("label.firmware_error", e = format!("{e}")).to_string();
                                     }
                                 }
                                 finished = true;
@@ -1035,102 +1044,165 @@ impl App {
     }
 
     fn settings_dialog(&self) -> Element<'_, Message> {
-        let title = text("Settings").size(22);
+        let title = text(t!("label.settings_title")).size(22);
 
-        // ── Serial section ──
-        let serial_section = container(
+        // ── Language / Display card ──
+        let lang_display_names = crate::i18n::language_display_names();
+        let lang_options: Vec<LangOption> = lang_display_names
+            .iter()
+            .map(|(code, display)| LangOption {
+                code: code.clone(),
+                display: display.clone(),
+            })
+            .collect();
+        let current_lang = lang_options
+            .iter()
+            .find(|o| o.code == self.settings.language)
+            .cloned();
+        let lang_pick = pick_list(
+            lang_options,
+            current_lang,
+            |opt: LangOption| Message::ChangeLanguage(opt.code),
+        );
+
+        let display_card = container(
             column![
-                text("Serial").size(15),
-                rule::horizontal(1),
-                text("Default port:").size(13),
+                row![
+                    text(t!("label.display_section")).size(15),
+                    Space::new().width(10.0),
+                    text("🎨").size(20),
+                ]
+                .align_y(iced::Alignment::Center),
+                Space::new().height(10.0),
+                row![
+                    text(t!("label.language")).size(13),
+                    Space::new().width(Length::Fill),
+                    lang_pick,
+                ]
+                .align_y(iced::Alignment::Center),
+            ]
+            .spacing(8),
+        )
+        .padding(16)
+        .style(container::bordered_box)
+        .width(Length::Fill);
+
+        // ── Serial port card ──
+        let serial_card = container(
+            column![
+                row![
+                    text(t!("label.serial_section")).size(15),
+                    Space::new().width(10.0),
+                    text("🔌").size(20),
+                ]
+                .align_y(iced::Alignment::Center),
+                Space::new().height(10.0),
+                text(t!("label.default_port")).size(13),
                 text_input("e.g. /dev/tty.usbserial-1110", &self.settings_port_input)
                     .on_input(Message::SettingsPortChanged)
                     .size(13),
                 if self.available_ports.is_empty() {
-                    text("No serial ports detected.").size(11)
+                    text(t!("label.no_ports")).size(11)
                 } else {
-                    text(format!("Available: {}", self.available_ports.join(", "))).size(11)
+                    text(t!("label.available_ports", ports = self.available_ports.join(", "))).size(11)
                 },
-                text("Baud rate:").size(13),
+                text(t!("label.baud_rate")).size(13),
                 text_input("115200", &self.settings_baud_input)
                     .on_input(Message::SettingsBaudChanged)
                     .size(13),
                 checkbox(self.settings.auto_listen)
-                    .label("Auto-listen on startup")
+                    .label(t!("label.auto_listen"))
                     .on_toggle(Message::ToggleAutoListen),
                 checkbox(self.settings.alert_on_data)
-                    .label("Beep on new capture")
+                    .label(t!("label.beep_on_capture"))
                     .on_toggle(Message::ToggleAlertOnData),
             ]
-            .spacing(4),
+            .spacing(8),
         )
         .padding(16)
-        .style(container::bordered_box);
+        .style(container::bordered_box)
+        .width(Length::Fill);
 
-        // ── Display section ──
-        let display_section = container(
+        // ── Maintenance card (firmware updates) ──
+        let maintenance_card = container(
             column![
-                text("Display").size(15),
-                rule::horizontal(1),
-                checkbox(self.settings.show_instructions)
-                    .label("Show instructions panel")
-                    .on_toggle(Message::ToggleInstructions),
+                row![
+                    text(t!("label.firmware_title")).size(15),
+                    Space::new().width(10.0),
+                    text("🛠️").size(20),
+                ]
+                .align_y(iced::Alignment::Center),
+                Space::new().height(10.0),
+                text(t!("label.firmware_warning")).size(10),
+                Space::new().height(8.0),
+                button(text(t!("btn.firmware_update")).size(13))
+                    .padding([6, 14])
+                    .on_press(Message::OpenFirmware),
             ]
             .spacing(4),
         )
         .padding(16)
-        .style(container::bordered_box);
+        .style(container::bordered_box)
+        .width(Length::Fill);
 
-        // ── About section ──
+        // ── About card ──
         let ver = env!("CARGO_PKG_VERSION");
         let repo = env!("CARGO_PKG_REPOSITORY");
         let config_path = crate::settings::config_dir_path()
             .map(|p| p.display().to_string())
             .unwrap_or_else(|| "unknown".to_string());
-        let about_section = container(
+        let about_card = container(
             column![
-                text("About").size(15),
-                rule::horizontal(1),
+                row![
+                    text(t!("label.about_section")).size(15),
+                    Space::new().width(10.0),
+                    text("ⓘ").size(20),
+                ]
+                .align_y(iced::Alignment::Center),
+                Space::new().height(10.0),
                 text(format!("DSO3D12 GUI v{ver}")).size(13),
                 button(text(repo).size(11))
                     .on_press(Message::OpenUrl(repo.to_string()))
                     .style(button::text),
-                text(format!("Config: {config_path}")).size(11),
-                Space::new().height(Length::Fixed(8.0)),
-                button(text("Firmware Update…").size(13)).on_press(Message::OpenFirmware),
+                text(format!("{}{}", t!("label.config_path"), config_path)).size(11),
             ]
-            .spacing(4),
+            .spacing(6),
         )
         .padding(16)
-        .style(container::bordered_box);
+        .style(container::bordered_box)
+        .width(Length::Fill);
 
-        let close_btn = button(text("Save & Close").size(13)).on_press(Message::CloseSettings);
+        let close_btn = button(text(t!("btn.save")).size(13)).on_press(Message::CloseSettings);
 
-        container(
-            column![
-                title,
-                Space::new().height(Length::Fixed(8.0)),
-                serial_section,
-                Space::new().height(Length::Fixed(8.0)),
-                display_section,
-                Space::new().height(Length::Fixed(8.0)),
-                about_section,
-                Space::new().height(Length::Fixed(16.0)),
-                close_btn,
-            ]
-            .spacing(4)
-            .padding(20)
-            .max_width(500),
+        scrollable(
+            container(
+                column![
+                    title,
+                    Space::new().height(Length::Fixed(8.0)),
+                    row![display_card, serial_card].spacing(8).width(Length::Fill),
+                    Space::new().height(Length::Fixed(8.0)),
+                    row![maintenance_card, about_card].spacing(8).width(Length::Fill),
+                    Space::new().height(Length::Fixed(16.0)),
+                    close_btn,
+                ]
+                .spacing(4)
+                .padding(20)
+                .max_width(700),
+            )
+            .center_x(Length::Fill)
+            .center_y(Length::Fill),
         )
-        .center_x(Length::Fill)
-        .center_y(Length::Fill)
+        .direction(scrollable::Direction::Vertical(
+            scrollable::Scrollbar::new().scroller_width(0.0).width(0.0),
+        ))
+        .width(Length::Fill)
         .into()
     }
 
     fn firmware_dialog(&self) -> Element<'_, Message> {
-        let title = text("Firmware Update").size(22);
+        let title = text(t!("label.firmware_title")).size(22);
         let warning = container(
-            text("⚠ WARNING: Flashing incorrect firmware may brick your device. Ensure the device is in boot mode and the correct firmware file is selected.")
+            text(t!("label.firmware_warning"))
                 .size(12),
         )
         .padding(8)
@@ -1138,10 +1210,10 @@ impl App {
 
         let boot_instructions = container(
             column![
-                text("Switching to Boot Mode (DSO3D12)").size(13),
+                text(t!("label.boot_title")).size(13),
                 Space::new().height(Length::Fixed(4.0)),
-                text("1. Connect the supplied USB cable to your PC while the oscilloscope is powered off.").size(11),
-                text("2. Press and hold the power button. The scope may enter a power-cycling loop — keep the button held down continuously until flashing reaches 100%.").size(11),
+                text(t!("label.boot_1")).size(11),
+                text(t!("label.boot_2")).size(11),
             ]
             .spacing(2),
         )
@@ -1157,15 +1229,15 @@ impl App {
             },
             Message::FirmwarePortSelected,
         )
-        .placeholder("Select port…")
+        .placeholder(t!("label.port"))
         .text_size(13);
-        let refresh_btn = button(text("Refresh").size(12)).on_press(Message::FirmwareRefreshPorts);
+        let refresh_btn = button(text(t!("btn.refresh")).size(12)).on_press(Message::FirmwareRefreshPorts);
 
         let file_label = match &self.firmware_file {
             Some(p) => text(p.file_name().and_then(|n| n.to_str()).unwrap_or("?")).size(13),
-            None => text("No file selected").size(13),
+            None => text(t!("label.no_file")).size(13),
         };
-        let file_btn = button(text("Browse…").size(13)).on_press(Message::FirmwareFileClicked);
+        let file_btn = button(text(t!("btn.browse")).size(13)).on_press(Message::FirmwareFileClicked);
 
         let progress_bar_el: Element<'_, Message> = if let Some((cur, total)) = self.firmware_progress
         {
@@ -1175,7 +1247,7 @@ impl App {
                 0.0
             };
             column![
-                text(format!("{pct:.0}% ({cur}/{total} blocks)")).size(12),
+                text(t!("label.pct_progress", pct = format!("{:.0}", pct), cur = cur, total = total)).size(12),
                 progress_bar(0.0..=total as f32, cur as f32),
             ]
             .spacing(2)
@@ -1185,16 +1257,17 @@ impl App {
         };
 
         let status_text = text(self.firmware_status.clone()).size(12);
+        // status_text is dynamically set, not translated here
 
         let is_flashing = self.firmware_handle.is_some();
         let update_btn = if is_flashing {
-            button(text("Updating…").size(13))
+            button(text(t!("btn.updating")).size(13))
         } else if self.firmware_confirming {
-            button(text("Confirm Update").size(13)).on_press(Message::FirmwareStart)
+            button(text(t!("btn.confirm_update")).size(13)).on_press(Message::FirmwareStart)
         } else {
-            button(text("Update").size(13)).on_press(Message::FirmwareConfirmStart)
+            button(text(t!("btn.update")).size(13)).on_press(Message::FirmwareConfirmStart)
         };
-        let close_btn = button(text("Close").size(13)).on_press(Message::CloseFirmware);
+        let close_btn = button(text(t!("btn.close")).size(13)).on_press(Message::CloseFirmware);
 
         container(
             column![
@@ -1204,10 +1277,10 @@ impl App {
                 Space::new().height(Length::Fixed(8.0)),
                 boot_instructions,
                 Space::new().height(Length::Fixed(8.0)),
-                text("Port:").size(13),
+                text(t!("label.port")).size(13),
                 row![port_picker, refresh_btn].spacing(8).align_y(iced::Alignment::Center),
                 Space::new().height(Length::Fixed(8.0)),
-                text("Firmware file (.fls):").size(13),
+                text(t!("label.firmware_file")).size(13),
                 row![file_btn, file_label].spacing(8).align_y(iced::Alignment::Center),
                 Space::new().height(Length::Fixed(8.0)),
                 progress_bar_el,
@@ -1225,11 +1298,11 @@ impl App {
     }
 
     fn instructions_overlay(&self) -> Element<'_, Message> {
-        let title = text("Instructions").size(22);
+        let title = text(t!("label.instructions_title")).size(22);
 
         let content = instructions_panel();
 
-        let close_btn = button(text("Close").size(13)).on_press(Message::CloseInstructions);
+        let close_btn = button(text(t!("btn.close")).size(13)).on_press(Message::CloseInstructions);
 
         container(
             column![
@@ -1251,13 +1324,13 @@ impl App {
     fn menu_bar(&self) -> Element<'_, Message> {
         let port_display = match &self.settings.serial_port {
             Some(p) => text(p.clone()).size(12),
-            None => text("No port").size(12),
+            None => text(t!("app.no_port")).size(12),
         };
 
         let listen_btn = if self.listening {
-            button(text("Stop").size(12)).on_press(Message::StopListening)
+            button(text(t!("btn.stop")).size(12)).on_press(Message::StopListening)
         } else {
-            button(text("Listen").size(12)).on_press(Message::StartListening)
+            button(text(t!("btn.listen")).size(12)).on_press(Message::StartListening)
         };
 
         let port_picker = pick_list(
@@ -1265,13 +1338,13 @@ impl App {
             self.settings.serial_port.clone(),
             Message::PortSelected,
         )
-        .placeholder("Port…")
+        .placeholder(t!("label.port"))
         .text_size(12);
 
-        let help_btn = button(text("Help").size(12)).on_press(Message::OpenInstructions);
+        let help_btn = button(text(t!("btn.help")).size(12)).on_press(Message::OpenInstructions);
 
         let status_row = row![
-                text("DSO3D12").size(14),
+                text(t!("app.title")).size(14),
                 Space::new().width(Length::Fixed(12.0)),
                 port_picker,
                 port_display,
@@ -1395,14 +1468,14 @@ impl App {
         let total_time_ms = 12.0 * t_per_div_ms;
 
         let mut items: Vec<Element<'_, Message>> = vec![
-            text("Measurement").size(13).into(),
+            text(t!("label.measurement")).size(13).into(),
             rule::horizontal(1).into(),
         ];
 
         // ── X cursor (time) ──
         items.push(
             checkbox(self.settings.measurement_cursor_x_enabled)
-                .label("Cursor X (time)")
+                .label(t!("label.cursor_x"))
                 .on_toggle(Message::ToggleMeasCursorX)
                 .into(),
         );
@@ -1432,7 +1505,7 @@ impl App {
         // ── Y cursor (voltage) ──
         items.push(
             checkbox(self.settings.measurement_cursor_y_enabled)
-                .label("Cursor Y (voltage)")
+                .label(t!("label.cursor_y"))
                 .on_toggle(Message::ToggleMeasCursorY)
                 .into(),
         );
@@ -1447,9 +1520,9 @@ impl App {
             let dv_ch2 = (v_ch2_hi - v_ch2_lo).abs();
             items.push(
                 column![
-                    text(format!("CH1 ΔV = {dv_ch1:.3} V")).size(11),
+                    text(t!("label.ch1_dv", v = format!("{:.3}", dv_ch1))).size(11),
                     text(format!("  ({v_ch1_lo:.2}V … {v_ch1_hi:.2}V)")).size(10),
-                    text(format!("CH2 ΔV = {dv_ch2:.3} V")).size(11),
+                    text(t!("label.ch2_dv", v = format!("{:.3}", dv_ch2))).size(11),
                     text(format!("  ({v_ch2_lo:.2}V … {v_ch2_hi:.2}V)")).size(10),
                 ]
                 .spacing(0)
@@ -1475,7 +1548,7 @@ impl App {
         // V/div row
         items.push(
             row![
-                text("V/div, V:").size(11).width(col_w),
+                text(t!("label.vdiv")).size(11).width(col_w),
                 text_input("1.0", &self.v_per_div_ch1_input)
                     .on_input(Message::VPerCellChangedCh1)
                     .size(11)
@@ -1505,7 +1578,7 @@ impl App {
             let p2 = if probe_ch2.is_empty() { "—".to_string() } else { probe_ch2 };
             items.push(
                 row![
-                    text("Probe:").size(11).width(col_w),
+                    text(t!("label.probe")).size(11).width(col_w),
                     text(p1).size(11).width(input_w),
                     text(p2).size(11).width(input_w),
                 ]
@@ -1516,7 +1589,7 @@ impl App {
         // V/off row
         items.push(
             row![
-                text("V/off, V:").size(11).width(col_w),
+                text(t!("label.voff")).size(11).width(col_w),
                 text_input("0.0", &self.v_offset_ch1_input)
                     .on_input(Message::VOffsetChangedCh1)
                     .size(11)
@@ -1533,7 +1606,7 @@ impl App {
         // t/div row (shared, spans both channels)
         items.push(
             row![
-                text("t/div, ms:").size(11).width(col_w),
+                text(t!("label.tdiv")).size(11).width(col_w),
                 text_input("1.0", &self.t_per_div_input)
                     .on_input(Message::TPerCellChanged)
                     .size(11)
@@ -1543,7 +1616,7 @@ impl App {
             .align_y(iced::Alignment::Center)
             .into(),
         );
-        items.push(text("AC mode: 8×V, 12×t div").size(9).into());
+        items.push(text(t!("label.ac_mode")).size(9).into());
         items.push(rule::horizontal(1).into());
 
         // ── Signal information (per-channel) ──
@@ -1596,7 +1669,7 @@ impl App {
         // ── Trigger + measurements from screenshot metadata ──
         if let Some(scope_state) = self.current_entry().and_then(|e| e.record.scope_state.as_ref()) {
             items.push(rule::horizontal(1).into());
-            items.push(text("Trigger").size(11).into());
+            items.push(text(t!("label.trigger")).size(11).into());
             items.push(
                 text(format!(
                     "Mode: {} | Edge: {} | Src: {}",
@@ -1639,7 +1712,7 @@ impl App {
             let has_m2 = scope_state.ch2.as_ref().and_then(|c| c.measurements.as_ref());
             if has_m1.is_some() || has_m2.is_some() {
                 items.push(rule::horizontal(1).into());
-                items.push(text("Auto Measurements").size(11).into());
+                items.push(text(t!("label.auto_meas")).size(11).into());
 
                 let fmt_v = |v: f64| -> String {
                     if v.abs() >= 1.0 { format!("{v:.3} V") }
@@ -1657,10 +1730,6 @@ impl App {
                 };
 
                 // Build measurement rows: label | CH1 | CH2
-                let labels = [
-                    "Freq", "PkPk", "Avg", "RMS", "Amp", "+Duty", "-Duty",
-                    "+T", "-T", "T", "Max", "Min", "Top", "Base",
-                ];
                 let ch_val = |m: Option<&dso_parser::ChannelMeasurements>, idx: usize| -> String {
                     match m {
                         None => "—".to_string(),
@@ -1694,19 +1763,41 @@ impl App {
                 items.push(
                     row![
                         text("").size(9).width(Length::Fixed(36.0)),
-                        text("CH1").size(9).width(Length::Fixed(72.0)),
-                        text("CH2").size(9).width(Length::Fixed(72.0)),
+                        text(t!("label.ch1")).size(9).width(Length::Fixed(72.0)),
+                        text(t!("label.ch2")).size(9).width(Length::Fixed(72.0)),
                     ]
                     .spacing(2)
                     .into(),
                 );
 
-                for (idx, lbl) in labels.iter().enumerate() {
-                    let v1 = ch_val(has_m1, idx);
-                    let v2 = ch_val(has_m2, idx);
+                let label_data: &[(u8, &str)] = &[
+                    (0, "Freq"), (1, "PkPk"), (2, "Avg"), (3, "RMS"), (4, "Amp"),
+                    (5, "+Duty"), (6, "-Duty"), (7, "+T"), (8, "-T"), (9, "T"),
+                    (10, "Max"), (11, "Min"), (12, "Top"), (13, "Base"),
+                ];
+                for &(idx, _key) in label_data {
+                    let v1 = ch_val(has_m1, idx as usize);
+                    let v2 = ch_val(has_m2, idx as usize);
+                    let label = match idx {
+                        0 => t!("label.freq_name").to_string(),
+                        1 => t!("label.pkpk_name").to_string(),
+                        2 => t!("label.avg_name").to_string(),
+                        3 => t!("label.rms_name").to_string(),
+                        4 => t!("label.amp_name").to_string(),
+                        5 => t!("label.duty_plus_name").to_string(),
+                        6 => t!("label.duty_minus_name").to_string(),
+                        7 => t!("label.t_plus_name").to_string(),
+                        8 => t!("label.t_minus_name").to_string(),
+                        9 => t!("label.t_name").to_string(),
+                        10 => t!("label.max_name").to_string(),
+                        11 => t!("label.min_name").to_string(),
+                        12 => t!("label.top_name").to_string(),
+                        13 => t!("label.base_name").to_string(),
+                        _ => unreachable!(),
+                    };
                     items.push(
                         row![
-                            text(*lbl).size(9).width(Length::Fixed(36.0)),
+                            text(label).size(9).width(Length::Fixed(36.0)),
                             text(v1).size(9).width(Length::Fixed(72.0)),
                             text(v2).size(9).width(Length::Fixed(72.0)),
                         ]
@@ -1734,7 +1825,7 @@ impl App {
         let has_dev_y = self.capture_has_device_cursor_y();
 
         let dev_x = {
-            let cb = checkbox(self.settings.device_cursor_x_enabled).label("Device X");
+            let cb = checkbox(self.settings.device_cursor_x_enabled).label(t!("label.device_x"));
             if has_dev_x {
                 cb.on_toggle(Message::ToggleDeviceCursorX)
             } else {
@@ -1742,7 +1833,7 @@ impl App {
             }
         };
         let dev_y = {
-            let cb = checkbox(self.settings.device_cursor_y_enabled).label("Device Y");
+            let cb = checkbox(self.settings.device_cursor_y_enabled).label(t!("label.device_y"));
             if has_dev_y {
                 cb.on_toggle(Message::ToggleDeviceCursorY)
             } else {
@@ -1752,20 +1843,20 @@ impl App {
 
         row![
             checkbox(self.settings.show_ch1)
-                .label("CH1")
+                .label(t!("label.ch1"))
                 .on_toggle(Message::ToggleCh1),
             checkbox(self.settings.show_ch2)
-                .label("CH2")
+                .label(t!("label.ch2"))
                 .on_toggle(Message::ToggleCh2),
             Space::new().width(Length::Fixed(16.0)),
             dev_x,
             dev_y,
             Space::new().width(Length::Fixed(16.0)),
             checkbox(self.settings.show_scales)
-                .label("Scales")
+                .label(t!("label.scales"))
                 .on_toggle(Message::ToggleShowScales),
             Space::new().width(Length::Fixed(16.0)),
-            text("View:").size(13),
+            text(t!("label.view")).size(13),
             pick_list(
                 ViewMode::ALL.as_slice(),
                 Some(self.settings.view_mode),
@@ -1781,21 +1872,21 @@ impl App {
 
     fn action_buttons(&self) -> Element<'_, Message> {
         row![
-            button(text("Load Capture").size(12)).on_press(Message::LoadClicked),
-            button(text("Save Capture").size(12)).on_press(Message::SaveCaptureClicked),
+            button(text(t!("btn.load_capture")).size(12)).on_press(Message::LoadClicked),
+            button(text(t!("btn.save_capture")).size(12)).on_press(Message::SaveCaptureClicked),
             Space::new().width(Length::Fixed(12.0)),
             text("│").size(12),
             Space::new().width(Length::Fixed(12.0)),
-            button(text("Save PNG").size(12)).on_press(Message::SavePngClicked),
+            button(text(t!("btn.save_png")).size(12)).on_press(Message::SavePngClicked),
             checkbox(self.settings.split_png)
-                .label("Split CH1/CH2")
+                .label(t!("label.split_ch"))
                 .on_toggle(Message::ToggleSplitPng),
             Space::new().width(Length::Fixed(12.0)),
             text("│").size(12),
             Space::new().width(Length::Fixed(12.0)),
-            button(text("Export Data").size(12)).on_press(Message::ExportCsvClicked),
+            button(text(t!("btn.export_data")).size(12)).on_press(Message::ExportCsvClicked),
             Space::new().width(Length::Fill),
-            button(text("Settings").size(12)).on_press(Message::OpenSettings),
+            button(text(t!("btn.settings")).size(12)).on_press(Message::OpenSettings),
         ]
         .spacing(6)
         .padding(4)
@@ -1808,36 +1899,37 @@ impl App {
 fn instructions_panel<'a>() -> Element<'a, Message> {
     // Keep each complete instruction block in a separate string so it can be
     // moved into locale files later without restructuring the widget tree.
-    let standard_firmware_instructions = "\
-Standard firmware — raw debug dump
+    let standard_firmware_instructions = format!(
+        "{}\n\n{}\n{}\n{}\n{}\n{}\n{}\n{}",
+        t!("label.standard_fw_title"),
+        t!("label.standard_fw_1"),
+        t!("label.standard_fw_2"),
+        t!("label.standard_fw_3"),
+        t!("label.standard_fw_4"),
+        t!("label.standard_fw_5"),
+        t!("label.standard_fw_6"),
+        t!("label.standard_fw_7"),
+    );
 
-1. Connect the oscilloscope to the computer using a USB Type-C cable.
-2. Feed a signal into the oscilloscope.
-3. Press Stop to freeze the sample buffer.
-4. Press Menu → Stop and leave the Channel 1 Measurements menu open.
-5. In the application, select the serial port and click Listen.
-6. Long-press the Save button on the oscilloscope to start transmitting the debug data.
-7. Wait for the transfer to complete. The oscilloscope sends approximately 300 kB at 115200 baud.";
+    let customized_firmware_instructions = format!(
+        "{}\n\n{}\n{}\n{}\n{}\n{}\n{}\n{}",
+        t!("label.customized_fw_title"),
+        t!("label.customized_fw_1"),
+        t!("label.customized_fw_2"),
+        t!("label.customized_fw_3"),
+        t!("label.customized_fw_4"),
+        t!("label.customized_fw_5"),
+        t!("label.customized_fw_6"),
+        t!("label.customized_fw_7"),
+    );
 
-    let customized_firmware_instructions = "\
-Customized firmware
-
-1. Connect the oscilloscope to the computer using a USB Type-C cable.
-2. In the application, select the serial port and click Listen.
-3. Capture a waveform on the oscilloscope by pressing Save while acquisition is running or stopped.
-4. Press Menu → Gallery to open the saved screenshots.
-5. Select the waveform that you want to transmit.
-6. The oscilloscope automatically sends a 2048-byte binary packet over the USB serial connection.
-7. The packet includes waveform data and metadata such as V/div, timebase, trigger settings, cursors, and measurements.";
-
-    let application_instructions = "\
-Using the waveform viewer
-
-The application can receive oscilloscope data in both supported transmission modes.
-
-After a waveform is received, you can inspect it, measure voltage and time intervals with cursors, and export the result as a PNG image or CSV data.
-
-Before receiving data, connect the oscilloscope using a USB Type-C cable, select the correct serial port, and click Listen. Keep the application listening while starting the transmission from the oscilloscope.";
+    let application_instructions = format!(
+        "{}\n\n{}\n\n{}\n\n{}",
+        t!("label.using_viewer_title"),
+        t!("label.using_viewer_1"),
+        t!("label.using_viewer_2"),
+        t!("label.using_viewer_3"),
+    );
 
     let standard_firmware = container(
         text(standard_firmware_instructions)
@@ -1849,7 +1941,7 @@ Before receiving data, connect the oscilloscope using a USB Type-C cable, select
 
     let customized_firmware = container(
         column![
-            button(text("ZeeTweak on GitHub").size(11))
+            button(text(t!("btn.help")).size(11))
                 .on_press(Message::OpenUrl(
                     "https://github.com/taligentx/ZeeTweak".to_owned(),
                 ))
@@ -1959,7 +2051,7 @@ fn thumbnails<'a>(dump: &'a Option<LoadedDump>, current: usize, can_undo: bool) 
     if is_empty {
         if can_undo {
             return container(
-                button(text("Undo Delete").size(12))
+                button(text(t!("btn.undo_delete")).size(12))
                     .on_press(Message::UndoDelete)
                     .style(button::secondary),
             )
@@ -2009,22 +2101,22 @@ fn thumbnails<'a>(dump: &'a Option<LoadedDump>, current: usize, can_undo: bool) 
                 iced::widget::column![
                     text(menu_ts.clone()).size(10),
                     rule::horizontal(1),
-                    button(text("Export PNG…").size(12))
+                    button(text(t!("btn.export_png")).size(12))
                         .on_press(Message::ContextMenuExportPngAt(ctx_idx))
                         .width(Length::Fill)
                         .style(button::text),
-                    button(text("Export CSV…").size(12))
+                    button(text(t!("btn.export_csv")).size(12))
                         .on_press(Message::ContextMenuExportCsvAt(ctx_idx))
                         .width(Length::Fill)
                         .style(button::text),
                     rule::horizontal(1),
-                    button(text("Delete").size(12))
+                    button(text(t!("btn.delete")).size(12))
                         .on_press(Message::ContextMenuDeleteAt(ctx_idx))
                         .width(Length::Fill)
                         .style(button::danger),
                     rule::horizontal(1),
                     {
-                        let undo_btn = button(text("Undo Delete").size(12))
+                        let undo_btn = button(text(t!("btn.undo_delete")).size(12))
                             .width(Length::Fill)
                             .style(button::text);
                         if can_undo {
@@ -2057,8 +2149,8 @@ fn thumbnails<'a>(dump: &'a Option<LoadedDump>, current: usize, can_undo: bool) 
 
 async fn pick_file() -> Option<PathBuf> {
     rfd::AsyncFileDialog::new()
-        .add_filter("ZeeWeii Capture", &["zwcap", "bin", "dat", "raw"])
-        .add_filter("All files", &["*"])
+        .add_filter(t!("label.zwcap_filter").to_string(), &["zwcap", "bin", "dat", "raw"])
+        .add_filter(t!("label.all_files").to_string(), &["*"])
         .pick_file()
         .await
         .map(|h| h.path().to_path_buf())
@@ -2068,8 +2160,8 @@ async fn pick_save_bin() -> Option<PathBuf> {
     let now = chrono::Local::now();
     let name = format!("capture_{}.zwcap", now.format("%Y%m%d_%H%M%S"));
     rfd::AsyncFileDialog::new()
-        .add_filter("ZeeWeii Capture", &["zwcap"])
-        .add_filter("All files", &["*"])
+        .add_filter(t!("label.zwcap_filter").to_string(), &["zwcap"])
+        .add_filter(t!("label.all_files").to_string(), &["*"])
         .set_file_name(&name)
         .save_file()
         .await
@@ -2080,7 +2172,7 @@ async fn pick_save_csv(ts: Option<DateTime<Local>>) -> Option<PathBuf> {
     let t = ts.unwrap_or_else(Local::now);
     let name = format!("capture_{}.csv", t.format("%Y%m%d_%H%M%S"));
     rfd::AsyncFileDialog::new()
-        .add_filter("CSV", &["csv"])
+        .add_filter(t!("label.csv_filter").to_string(), &["csv"])
         .set_file_name(&name)
         .save_file()
         .await
@@ -2091,7 +2183,7 @@ async fn pick_save_png(ts: Option<DateTime<Local>>) -> Option<PathBuf> {
     let t = ts.unwrap_or_else(Local::now);
     let name = format!("capture_{}.png", t.format("%Y%m%d_%H%M%S"));
     rfd::AsyncFileDialog::new()
-        .add_filter("PNG Image", &["png"])
+        .add_filter(t!("label.png_filter").to_string(), &["png"])
         .set_file_name(&name)
         .save_file()
         .await
@@ -2100,8 +2192,8 @@ async fn pick_save_png(ts: Option<DateTime<Local>>) -> Option<PathBuf> {
 
 async fn pick_firmware_file() -> Option<PathBuf> {
     rfd::AsyncFileDialog::new()
-        .add_filter("Firmware", &["fls", "bin"])
-        .add_filter("All files", &["*"])
+        .add_filter(t!("label.fls_filter").to_string(), &["fls", "bin"])
+        .add_filter(t!("label.all_files").to_string(), &["*"])
         .pick_file()
         .await
         .map(|h| h.path().to_path_buf())

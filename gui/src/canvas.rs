@@ -178,7 +178,7 @@ impl<Message: Clone> canvas::Program<Message> for Scope<'_, Message> {
             }
         } else {
             let text = Text {
-                content: "No capture loaded — use Load Capture…".to_string(),
+                content: crate::i18n::t!("app.no_capture_loaded").to_string(),
                 position: Point::new(frame.width() / 2.0, frame.height() / 2.0),
                 color: Color::from_rgb(0.7, 0.7, 0.7),
                 size: 16.0.into(),

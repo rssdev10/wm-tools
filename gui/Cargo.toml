@@ -29,6 +29,9 @@ crc = "3.2"
 open = "5"
 ab_glyph = "0.2"
 font-kit = "0.14"
+rust-i18n = { workspace = true }
+sys-locale = "0.3"
+
 
 [dev-dependencies]
 ab_glyph = "0.2"
