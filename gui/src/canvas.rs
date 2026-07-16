@@ -357,7 +357,7 @@ fn draw_scales(
 ) {
     let size = frame.size();
     let rows = V_CELLS;
-    let cols = 10; // grid visual divisions (drawn grid is 10 columns)
+    let cols = T_CELLS; // grid visual divisions
 
     // X axis: time labels at each visual division.
     let total_time_ms = T_CELLS as f64 * t_per_div_ms;

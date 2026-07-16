@@ -147,6 +147,7 @@
   "label.base_name": "Осн",
   "label.cursor_x_range": "Курсор X (время)",
   "label.cursor_y_range": "Курсор Y (напряжение)",
+  "label.ctrl_fine_drag": "Зажмите CTRL для точного перемещения",
   "label.view_mode_line": "Линия",
   "label.view_mode_dot": "Точки",
   "label.view_mode_smooth": "Сглаженный"

@@ -10,7 +10,13 @@ use iced::widget::{
     button, canvas, checkbox, column, container, pick_list, progress_bar, row, rule,
     scrollable, text, text_input, Space,
 };
-use iced::{Element, Length, Subscription, Task, Theme};
+use iced::{
+    event,
+    keyboard,
+    mouse,
+    Color, Event,
+    Element, Length, Subscription, Task, Theme,
+};
 
 use crate::canvas::{Scope, T_CELLS, Thumbnail, V_CELLS};
 use crate::i18n::t;
@@ -51,6 +57,8 @@ pub enum Message {
     ToggleMeasCursorX(bool),
     ToggleMeasCursorY(bool),
     MeasCursorXChanged(f32, f32),
+    ModifiersChanged(keyboard::Modifiers),
+    LeftMouseReleased,
     MeasCursorYChanged(f32, f32),
     // Scale inputs (V/div, time/div, V offset)
     VPerCellChangedCh1(String),
@@ -129,6 +137,20 @@ impl std::fmt::Display for LangOption {
     }
 }
 
+/// Factor applied to cursor movement when Ctrl is held (fine-drag mode).
+const FINE_DRAG_FACTOR: f32 = 0.1;
+
+/// Anchor state for fine-dragging a measurement cursor range.
+/// Stores the logical and raw slider values at the moment Ctrl+drag began,
+/// so that only 1/10 of the raw delta is applied to the logical value.
+#[derive(Debug, Clone, Copy)]
+struct FineRangeDrag {
+    /// Slider values when the Ctrl-drag began.
+    logical_start: (f32, f32),
+    /// First raw values emitted by the range slider.
+    raw_start: (f32, f32),
+}
+
 // ── State ──────────────────────────────────────────────────────────────────
 
 pub struct App {
@@ -166,6 +188,9 @@ pub struct App {
     deleted_capture: Option<(usize, CaptureEntry)>,
     /// Timestamp of the last deletion, for 30-second undo expiry.
     deleted_at: Option<std::time::Instant>,
+    ctrl_pressed: bool,
+    measurement_cursor_x_fine_drag: Option<FineRangeDrag>,
+    measurement_cursor_y_fine_drag: Option<FineRangeDrag>,
     /// Text input state for V/div scale (CH1).
     v_per_div_ch1_input: String,
     /// Text input state for V/div scale (CH2).
@@ -221,6 +246,9 @@ impl App {
                 context_export_idx: None,
                 deleted_capture: None,
                 deleted_at: None,
+                ctrl_pressed: false,
+                measurement_cursor_x_fine_drag: None,
+                measurement_cursor_y_fine_drag: None,
                 v_per_div_ch1_input: v_per_div_ch1_str,
                 v_per_div_ch2_input: v_per_div_ch2_str,
                 t_per_div_input: t_per_div_str,
@@ -315,6 +343,17 @@ impl App {
                     .map(|_| Message::UndoExpiredTick),
             );
         }
+
+        // Keyboard modifier and mouse-release events for fine-drag
+        subs.push(event::listen_with(|event, _status, _window| match event {
+            Event::Keyboard(keyboard::Event::ModifiersChanged(modifiers)) => {
+                Some(Message::ModifiersChanged(modifiers))
+            }
+            Event::Mouse(mouse::Event::ButtonReleased(mouse::Button::Left)) => {
+                Some(Message::LeftMouseReleased)
+            }
+            _ => None,
+        }));
 
         Subscription::batch(subs)
     }
@@ -624,12 +663,31 @@ impl App {
                 self.settings.save();
                 Task::none()
             }
-            Message::MeasCursorXChanged(lo, hi) => {
-                self.settings.cursor_x_range = (lo, hi);
+            Message::MeasCursorXChanged(raw_lo, raw_hi) => {
+                let ctrl = self.ctrl_pressed;
+                let anchor = &mut self.measurement_cursor_x_fine_drag;
+                let range = &mut self.settings.cursor_x_range;
+                App::apply_fine_drag(ctrl, anchor, range, raw_lo, raw_hi);
                 Task::none()
             }
-            Message::MeasCursorYChanged(lo, hi) => {
-                self.settings.cursor_y_range = (lo, hi);
+            Message::ModifiersChanged(modifiers) => {
+                self.ctrl_pressed = modifiers.control();
+                if !self.ctrl_pressed {
+                    self.measurement_cursor_x_fine_drag = None;
+                    self.measurement_cursor_y_fine_drag = None;
+                }
+                Task::none()
+            }
+            Message::LeftMouseReleased => {
+                self.measurement_cursor_x_fine_drag = None;
+                self.measurement_cursor_y_fine_drag = None;
+                Task::none()
+            }
+            Message::MeasCursorYChanged(raw_lo, raw_hi) => {
+                let ctrl = self.ctrl_pressed;
+                let anchor = &mut self.measurement_cursor_y_fine_drag;
+                let range = &mut self.settings.cursor_y_range;
+                App::apply_fine_drag(ctrl, anchor, range, raw_lo, raw_hi);
                 Task::none()
             }
             Message::VPerCellChangedCh1(s) => {
@@ -1390,6 +1448,33 @@ impl App {
         self.settings.save();
     }
 
+    /// Apply fine-drag scaling when Ctrl is held: only 1/10 of the raw
+    /// slider delta is applied to the logical cursor range.
+    fn apply_fine_drag(
+        ctrl_pressed: bool,
+        drag_anchor: &mut Option<FineRangeDrag>,
+        target_range: &mut (f32, f32),
+        raw_lo: f32,
+        raw_hi: f32,
+    ) {
+        if ctrl_pressed {
+            let drag = drag_anchor.get_or_insert(FineRangeDrag {
+                logical_start: *target_range,
+                raw_start: (raw_lo, raw_hi),
+            });
+
+            let lo =
+                drag.logical_start.0 + (raw_lo - drag.raw_start.0) * FINE_DRAG_FACTOR;
+            let hi =
+                drag.logical_start.1 + (raw_hi - drag.raw_start.1) * FINE_DRAG_FACTOR;
+
+            *target_range = (lo.clamp(0.0, 1.0), hi.clamp(0.0, 1.0));
+        } else {
+            *drag_anchor = None;
+            *target_range = (raw_lo, raw_hi);
+        }
+    }
+
     fn scope_widget(&self) -> Element<'_, Message> {
         let cap = self.current_capture();
         log::trace!(
@@ -1482,17 +1567,18 @@ impl App {
 
         if self.settings.measurement_cursor_x_enabled {
             items.push(range_slider::horizontal(xlo, xhi, Message::MeasCursorXChanged));
+            items.push(text(t!("label.ctrl_fine_drag")).size(9).color(Color::from_rgb(0.6, 0.6, 0.6)).into());
             let t_lo = xlo as f64 * total_time_ms;
             let t_hi = xhi as f64 * total_time_ms;
             let dt_ms = t_hi - t_lo;
             let freq = if dt_ms > 0.0 {
-                format!("{:.1} Hz", 1000.0 / dt_ms)
+                format_frequency_hz(1000.0 / dt_ms)
             } else {
                 "—".to_string()
             };
             items.push(
                 column![
-                    text(format!("Δt = {dt_ms:.3} ms")).size(11),
+                    text(format!("Δt = {}", format_duration_ms(dt_ms))).size(11),
                     text(format!("≈ freq: {freq}")).size(11),
                 ]
                 .spacing(2)
@@ -1512,6 +1598,7 @@ impl App {
 
         if self.settings.measurement_cursor_y_enabled {
             items.push(range_slider::horizontal(ylo, yhi, Message::MeasCursorYChanged));
+            // items.push(text(t!("label.ctrl_fine_drag")).size(9).color(Color::from_rgb(0.6, 0.6, 0.6)).into());
             let v_ch1_lo = frac_to_voltage(ylo as f64, v_per_div_ch1, v_offset_ch1);
             let v_ch1_hi = frac_to_voltage(yhi as f64, v_per_div_ch1, v_offset_ch1);
             let v_ch2_lo = frac_to_voltage(ylo as f64, v_per_div_ch2, v_offset_ch2);
@@ -1721,7 +1808,8 @@ impl App {
                 let fmt_t = |s: f64| -> String {
                     if s >= 1.0 { format!("{s:.3} s") }
                     else if s >= 0.001 { format!("{:.3} ms", s * 1000.0) }
-                    else { format!("{:.2} µs", s * 1_000_000.0) }
+                    else if s >= 0.000_001 { format!("{:.2} µs", s * 1_000_000.0) }
+                    else { format!("{:.2} ns", s * 1_000_000_000.0) }
                 };
                 let fmt_hz = |hz: f64| -> String {
                     if hz >= 1_000_000.0 { format!("{:.3} MHz", hz / 1_000_000.0) }
@@ -2023,14 +2111,39 @@ fn format_float(v: f64) -> String {
     }
 }
 
+/// Format a time duration given in milliseconds into a human-readable string
+/// with automatic unit switching (ms / µs / ns).
+fn format_duration_ms(ms: f64) -> String {
+    if ms >= 1.0 {
+        format!("{ms:.3} ms")
+    } else if ms >= 0.001 {
+        format!("{:.3} µs", ms * 1000.0)
+    } else {
+        format!("{:.3} ns", ms * 1_000_000.0)
+    }
+}
+
+/// Format a frequency in Hz into a human-readable string with automatic unit
+/// switching (Hz / kHz / MHz).
+fn format_frequency_hz(hz: f64) -> String {
+    if hz >= 1_000_000.0 {
+        format!("{:.3} MHz", hz / 1_000_000.0)
+    } else if hz >= 1000.0 {
+        format!("{:.3} kHz", hz / 1000.0)
+    } else {
+        format!("{hz:.2} Hz")
+    }
+}
+
 /// Grid constants from canvas.rs: 8 divs × 25 px/div = 200 px grid height.
 use crate::canvas::{GRID_HEIGHT_PX, PX_PER_DIV};
 
 /// Convert a fractional Y position on the graph (0.0 = top, 1.0 = bottom)
 /// to voltage.  Formula from pixel_to_volts: V = V_offset + (ADC_MID - v) × V/div / PX_PER_DIV,
-/// where v = frac × GRID_HEIGHT_PX is the stored ADC value at that position.
+/// where v = frac × GRID_HEIGHT_PX + PX_PER_DIV matches draw_trace's offset
+/// (v=25 maps to y=0, the top of the visible grid).
 fn frac_to_voltage(frac: f64, v_per_div: f64, v_offset: f64) -> f64 {
-    let v = frac * GRID_HEIGHT_PX;
+    let v = frac * GRID_HEIGHT_PX + PX_PER_DIV;
     v_offset + (ADC_VALUE_MID as f64 - v) * v_per_div / PX_PER_DIV
 }
 

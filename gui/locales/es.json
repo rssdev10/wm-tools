@@ -147,6 +147,7 @@
   "label.base_name": "Base",
   "label.cursor_x_range": "Cursor X (tiempo)",
   "label.cursor_y_range": "Cursor Y (voltaje)",
+  "label.ctrl_fine_drag": "Mantén CTRL para arrastre fino",
   "label.view_mode_line": "Línea",
   "label.view_mode_dot": "Punto",
   "label.view_mode_smooth": "Suave"

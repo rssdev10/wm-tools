@@ -147,6 +147,7 @@
   "label.base_name": "底端",
   "label.cursor_x_range": "光标X (时间)",
   "label.cursor_y_range": "光标Y (电压)",
+  "label.ctrl_fine_drag": "按住CTRL进行精细拖动",
   "label.view_mode_line": "连线",
   "label.view_mode_dot": "散点",
   "label.view_mode_smooth": "平滑"
