@@ -51,7 +51,7 @@ pub const ADC_VALUE_MAX: u8 = 255;
 pub const ADC_VALUE_MID: u8 = 128;
 
 /// Device display vertical pixels per division (200 px ÷ 8 div = 25 px/div).
-pub const PIXELS_PER_DIV: f64 = 25.0;
+pub const PIXELS_PER_DIV: f64 = 25.0; // corresponds to snapshots
 
 // ── Capture struct ────────────────────────────────────────────────────────
 ///
