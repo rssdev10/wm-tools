@@ -102,8 +102,10 @@ impl<Message: Clone> canvas::Program<Message> for Scope<'_, Message> {
             0.0
         };
         let gw = bounds.width - gx;
+        let gy = if self.show_scales { SCALE_MARGIN_BOTTOM } else { 0.0 };
+        let gh = bounds.height - gy;
         let frac_x = ((pos.x - gx) / gw).clamp(0.0, 1.0);
-        let frac_y = (pos.y / bounds.height).clamp(0.0, 1.0);
+        let frac_y = (pos.y / gh).clamp(0.0, 1.0);
 
         match event {
             canvas::Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Left)) => {
@@ -183,9 +185,11 @@ impl<Message: Clone> canvas::Program<Message> for Scope<'_, Message> {
         } else {
             0.0
         };
+        let gy = if self.show_scales { SCALE_MARGIN_BOTTOM } else { 0.0 };
         let gw = frame.width() - gx;
+        let gh = frame.height() - gy;
 
-        draw_grid(&mut frame, bounds.size(), gx);
+        draw_grid(&mut frame, bounds.size(), gx, gy);
 
         if let Some(cap) = self.capture {
             // Draw traces for each enabled channel.
@@ -195,13 +199,13 @@ impl<Message: Clone> canvas::Program<Message> for Scope<'_, Message> {
             ];
             for &(show, data, color) in &channels {
                 if let Some(samples) = show.then_some(data).flatten() {
-                    draw_trace(&mut frame, samples, color, self.view_mode, gx);
+                    draw_trace(&mut frame, samples, color, self.view_mode, gx, gh);
                 }
             }
         } else {
             let text = Text {
                 content: crate::i18n::t!("app.no_capture_loaded").to_string(),
-                position: Point::new(gx + gw / 2.0, frame.height() / 2.0),
+                position: Point::new(gx + gw / 2.0, gh / 2.0),
                 color: Color::from_rgb(0.7, 0.7, 0.7),
                 size: 16.0.into(),
                 align_x: iced::alignment::Horizontal::Center.into(),
@@ -213,7 +217,7 @@ impl<Message: Clone> canvas::Program<Message> for Scope<'_, Message> {
 
         // Measurement cursors (user-controlled, with shaded range).
         if let Some((xl, xr)) = self.meas_cursor_x {
-            let h = frame.height();
+            let h = gh;
             let px_l = gx + xl.clamp(0.0, 1.0) * gw;
             let px_r = gx + xr.clamp(0.0, 1.0) * gw;
             let region = Path::rectangle(
@@ -227,7 +231,7 @@ impl<Message: Clone> canvas::Program<Message> for Scope<'_, Message> {
         }
         if let Some((yu, yl)) = self.meas_cursor_y {
             let w = frame.width();
-            let h = frame.height();
+            let h = gh;
             let py_u = yu.clamp(0.0, 1.0) * h;
             let py_l = yl.clamp(0.0, 1.0) * h;
             let region = Path::rectangle(
@@ -243,7 +247,7 @@ impl<Message: Clone> canvas::Program<Message> for Scope<'_, Message> {
         // Device cursors (read-only, dashed-look using thinner line, different colour).
         let dev_stroke = Stroke::default().with_color(DEV_CURSOR).with_width(1.0);
         if let Some((a, b)) = self.device_cursor_x {
-            let h = frame.height();
+            let h = gh;
             for x in [a, b] {
                 let px = gx + x.clamp(0.0, 1.0) * gw;
                 frame.stroke(
@@ -266,7 +270,7 @@ impl<Message: Clone> canvas::Program<Message> for Scope<'_, Message> {
         }
         if let Some((a, b)) = self.device_cursor_y {
             let w = frame.width();
-            let h = frame.height();
+            let h = gh;
             for y in [a, b] {
                 let py = y.clamp(0.0, 1.0) * h;
                 frame.stroke(
@@ -306,6 +310,7 @@ impl<Message: Clone> canvas::Program<Message> for Scope<'_, Message> {
                 self.v_offset_ch1,
                 self.v_offset_ch2,
                 gx,
+                gh,
             );
         }
 
@@ -313,13 +318,13 @@ impl<Message: Clone> canvas::Program<Message> for Scope<'_, Message> {
     }
 }
 
-fn draw_grid(frame: &mut Frame, size: Size, margin_left: f32) {
+fn draw_grid(frame: &mut Frame, size: Size, margin_left: f32, margin_bottom: f32) {
     // 12 horizontal x 8 vertical divisions, like a real scope.
     let cols = T_CELLS;
     let rows = V_CELLS;
     let gw = size.width - margin_left;
     let dx = gw / cols as f32;
-    let dy = size.height / rows as f32;
+    let dy = (size.height - margin_bottom) / rows as f32;
 
     let stroke = Stroke::default().with_color(GRID).with_width(1.0);
     for i in 0..cols {
@@ -327,7 +332,7 @@ fn draw_grid(frame: &mut Frame, size: Size, margin_left: f32) {
         let p = Path::line(Point::new(x, 0.0), Point::new(x, size.height));
         frame.stroke(&p, stroke);
     }
-    for i in 1..rows {
+    for i in 1..rows+1 {
         let y = i as f32 * dy;
         let p = Path::line(Point::new(0.0, y), Point::new(size.width, y));
         frame.stroke(&p, stroke);
@@ -348,6 +353,7 @@ fn draw_grid(frame: &mut Frame, size: Size, margin_left: f32) {
 
 /// Left margin reserved for voltage scale labels (pixels).
 const SCALE_MARGIN_LEFT: f32 = 40.0;
+const SCALE_MARGIN_BOTTOM: f32 = 15.0;
 
 const SCALE_COLOR: Color = Color::from_rgb(0.60, 0.65, 0.70);
 
@@ -372,13 +378,14 @@ fn draw_scales(
     v_offset_ch1: f64,
     v_offset_ch2: f64,
     margin_left: f32,
+    graph_height: f32,
 ) {
     let size = frame.size();
     let rows = V_CELLS;
     let cols = T_CELLS; // grid visual divisions
     let gw = size.width - margin_left;
 
-    // X axis: time labels at each visual division.
+    // X axis: time labels at each visual division, in the bottom margin.
     let total_time_ms = T_CELLS as f64 * t_per_div_ms;
     let dx = gw / cols as f32;
     for i in 0..=cols {
@@ -388,7 +395,7 @@ fn draw_scales(
         let content = format_duration_ms_scale(time_ms);
         let label = Text {
             content,
-            position: Point::new(x + 2.0, size.height - 12.0),
+            position: Point::new(x + 2.0, graph_height + 2.0),
             color: SCALE_COLOR,
             size: 9.0.into(),
             ..Text::default()
@@ -406,7 +413,7 @@ fn draw_scales(
         for i in 0..=rows {
             let v = ((i + 1) as f64 / rows as f64) * GRID_HEIGHT_PX;
             let voltage = v_offset + (ADC_VALUE_MID as f64 - v) * v_per_div / PX_PER_DIV;
-            let y = (i as f32 / rows as f32) * size.height;
+            let y = (i as f32 / rows as f32) * graph_height;
             let label = Text {
                 content: format!("{voltage:.2}V"),
                 position: Point::new(x_off, y + 2.0),
@@ -426,7 +433,7 @@ fn draw_scales(
     }
 }
 
-fn draw_trace(frame: &mut Frame, samples: &[u8], color: Color, mode: ViewMode, margin_left: f32) {
+fn draw_trace(frame: &mut Frame, samples: &[u8], color: Color, mode: ViewMode, margin_left: f32, graph_height: f32) {
     if samples.is_empty() {
         return;
     }
@@ -458,7 +465,7 @@ fn draw_trace(frame: &mut Frame, samples: &[u8], color: Color, mode: ViewMode, m
         // Capture values use screen-coordinate convention: low value = top
         // of screen = positive voltage, high value = bottom = negative voltage.
         // Use device pixel density: GRID_HEIGHT_PX = V_CELLS × PX_PER_DIV.
-        let y = (((v - PX_PER_DIV as f32) as f64 / GRID_HEIGHT_PX) * size.height as f64) as f32;
+        let y = (((v - PX_PER_DIV as f32) as f64 / GRID_HEIGHT_PX) * graph_height as f64) as f32;
         Point::new(x, y)
     };
 
