@@ -51,6 +51,9 @@ pub struct Settings {
     /// Last window size (width, height) in logical pixels.
     #[serde(default = "default_window_size")]
     pub window_size: (f32, f32),
+    /// Target graph width for PNG export in pixels. 0 = small (600 px), 800+ = high-res.
+    #[serde(default = "default_png_width")]
+    pub png_export_width: u32,
 }
 
 fn default_v_per_div() -> f64 {
@@ -67,6 +70,10 @@ fn default_language() -> String {
 
 fn default_window_size() -> (f32, f32) {
     (800.0, 600.0)
+}
+
+fn default_png_width() -> u32 {
+    800
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -115,6 +122,7 @@ impl Default for Settings {
             v_offset_ch2: 0.0,
             language: default_language(),
             window_size: default_window_size(),
+            png_export_width: 800,
         }
     }
 }

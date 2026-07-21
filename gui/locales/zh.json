@@ -85,6 +85,7 @@
   "label.beep_on_capture": "新捕获时发出提示音",
   "label.display_section": "显示",
   "label.language": "语言",
+  "label.png_width": "PNG宽度，像素（0=小）:",
   "label.about_section": "关于",
   "label.repository": "仓库:",
   "label.config_path": "配置路径: ",

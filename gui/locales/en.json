@@ -86,6 +86,7 @@
   "label.beep_on_capture": "Beep on new capture",
   "label.display_section": "Display",
   "label.language": "Language",
+  "label.png_width": "PNG width, px (0=small):",
   "label.about_section": "About",
   "label.repository": "Repository:",
   "label.config_path": "Config path: ",

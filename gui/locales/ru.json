@@ -85,6 +85,7 @@
   "label.beep_on_capture": "Звуковой сигнал при захвате",
   "label.display_section": "Экран",
   "label.language": "Язык",
+  "label.png_width": "Ширина PNG, px (0=мал.):",
   "label.about_section": "О программе",
   "label.repository": "Репозиторий:",
   "label.config_path": "Конфиг: ",

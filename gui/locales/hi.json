@@ -85,6 +85,7 @@
   "label.beep_on_capture": "नए कैप्चर पर बीप",
   "label.display_section": "प्रदर्शन",
   "label.language": "भाषा",
+  "label.png_width": "PNG चौड़ाई, px (0=छोटा):",
   "label.about_section": "के बारे में",
   "label.repository": "भंडार:",
   "label.config_path": "कॉन्फ़िग: ",

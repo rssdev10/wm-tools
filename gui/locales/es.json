@@ -85,6 +85,7 @@
   "label.beep_on_capture": "Sonido al recibir captura",
   "label.display_section": "Pantalla",
   "label.language": "Idioma",
+  "label.png_width": "Ancho PNG, px (0=peq.):",
   "label.about_section": "Acerca de",
   "label.repository": "Repositorio:",
   "label.config_path": "Config: ",

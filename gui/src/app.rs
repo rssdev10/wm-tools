@@ -78,6 +78,7 @@ pub enum Message {
     CloseSettings,
     SettingsBaudChanged(String),
     SettingsPortChanged(String),
+    SettingsPngWidthChanged(String),
     // Firmware dialog
     OpenFirmware,
     CloseFirmware,
@@ -171,6 +172,8 @@ pub struct App {
     /// Editable fields in settings dialog.
     settings_baud_input: String,
     settings_port_input: String,
+    /// Editable PNG export width in settings dialog.
+    png_width_input: String,
     /// Firmware dialog state.
     show_firmware: bool,
     firmware_port: String,
@@ -219,6 +222,7 @@ impl App {
         let t_per_div_str = format_float(settings.t_per_div_ms);
         let v_offset_ch1_str = format_float(settings.v_offset_ch1);
         let v_offset_ch2_str = format_float(settings.v_offset_ch2);
+        let png_width_str = settings.png_export_width.to_string();
         (
             Self {
                 settings,
@@ -234,6 +238,7 @@ impl App {
                 show_instructions: false,
                 settings_baud_input: baud_str,
                 settings_port_input: port_str,
+                png_width_input: png_width_str,
                 show_firmware: false,
                 firmware_port: String::new(),
                 firmware_file: None,
@@ -778,6 +783,7 @@ impl App {
                 self.show_settings = true;
                 self.settings_baud_input = self.settings.baud_rate.to_string();
                 self.settings_port_input = self.settings.serial_port.clone().unwrap_or_default();
+                self.png_width_input = self.settings.png_export_width.to_string();
                 Task::none()
             }
             Message::CloseSettings => {
@@ -789,6 +795,12 @@ impl App {
                 }
                 let p = self.settings_port_input.trim().to_string();
                 self.settings.serial_port = if p.is_empty() { None } else { Some(p) };
+                // PNG export width: minimum 300 px, 0 = default small.
+                if let Ok(w) = self.png_width_input.trim().parse::<u32>() {
+                    if w == 0 || w >= 300 {
+                        self.settings.png_export_width = w;
+                    }
+                }
                 self.settings.save();
                 self.show_settings = false;
                 self.status = t!("app.settings_saved").to_string();
@@ -800,6 +812,10 @@ impl App {
             }
             Message::SettingsPortChanged(s) => {
                 self.settings_port_input = s;
+                Task::none()
+            }
+            Message::SettingsPngWidthChanged(s) => {
+                self.png_width_input = s;
                 Task::none()
             }
             Message::ToggleShowScales(v) => {
@@ -1136,6 +1152,16 @@ impl App {
                     text(t!("label.language")).size(13),
                     Space::new().width(Length::Fill),
                     lang_pick,
+                ]
+                .align_y(iced::Alignment::Center),
+                Space::new().height(10.0),
+                row![
+                    text(t!("label.png_width")).size(13),
+                    Space::new().width(Length::Fill),
+                    text_input("0", &self.png_width_input)
+                        .on_input(Message::SettingsPngWidthChanged)
+                        .size(13)
+                        .width(Length::Fixed(70.0)),
                 ]
                 .align_y(iced::Alignment::Center),
             ]
@@ -2470,12 +2496,68 @@ const PNG_CH1: [u8; 3] = [255, 217, 25];
 const PNG_CH2: [u8; 3] = [242, 25, 242];
 const PNG_SCALE_TEXT: [u8; 3] = [153, 166, 179];
 
+/// Configuration for PNG export resolution and rendering quality.
+pub struct PngExportConfig {
+    /// Target graph area width in pixels. 0 = default small (600 px).
+    pub target_width: u32,
+}
+
+impl PngExportConfig {
+    fn scale(&self) -> f64 {
+        const BASE: u32 = T_CELLS as u32 * 50;
+        if self.target_width > 0 {
+            self.target_width as f64 / BASE as f64
+        } else {
+            1.0
+        }
+    }
+
+    fn graph_w(&self) -> u32 {
+        const BASE: u32 = T_CELLS as u32 * 50;
+        (BASE as f64 * self.scale()).round() as u32
+    }
+
+    fn graph_h(&self) -> u32 {
+        const BASE: u32 = V_CELLS as u32 * 50;
+        (BASE as f64 * self.scale()).round() as u32
+    }
+
+    fn scale_margin_left(&self, show: bool) -> u32 {
+        if show { (65.0 * self.scale()).round() as u32 } else { 0 }
+    }
+
+    fn scale_margin_bottom(&self, show: bool) -> u32 {
+        if show { (16.0 * self.scale()).round() as u32 } else { 0 }
+    }
+
+    fn grid_line_width(&self) -> u32 {
+        let s = self.scale();
+        if s > 2.0 { 2 } else { 1 }
+    }
+
+    /// Half-width of the trace line (pixels above/below centre).
+    /// Scales proportionally to image width, ceiled to whole pixels.
+    fn trace_half_width(&self) -> i32 {
+        (self.scale() * 0.8).ceil() as i32
+    }
+
+    fn use_system_font(&self) -> bool {
+        self.target_width > 0
+    }
+
+    fn font_size(&self) -> f32 {
+        (11.0 * self.scale() as f32).max(11.0)
+    }
+}
+
 /// Export the current capture as a PNG image.
 fn export_png(path: &std::path::Path, cap: &Capture, settings: &Settings) -> anyhow::Result<()> {
-    let graph_w: u32 = T_CELLS as u32 * 50;
-    let graph_h: u32 = V_CELLS as u32 * 50;
-    let scale_margin_left: u32 = if settings.show_scales { 50 } else { 0 };
-    let scale_margin_bottom: u32 = if settings.show_scales { 16 } else { 0 };
+    let config = PngExportConfig { target_width: settings.png_export_width };
+
+    let graph_w = config.graph_w();
+    let graph_h = config.graph_h();
+    let scale_margin_left = config.scale_margin_left(settings.show_scales);
+    let scale_margin_bottom = config.scale_margin_bottom(settings.show_scales);
 
     let has_ch2 = cap.ch2.is_some();
     let do_split = settings.split_png && settings.show_ch1 && settings.show_ch2 && has_ch2;
@@ -2492,26 +2574,43 @@ fn export_png(path: &std::path::Path, cap: &Capture, settings: &Settings) -> any
         chunk.copy_from_slice(&PNG_BG);
     }
 
+    let use_system_font = config.use_system_font();
+    let grid_lw = config.grid_line_width();
+    let trace_hw = config.trace_half_width();
+    let font_size = config.font_size();
+
     // Helper to draw a grid into a sub-region of the pixel buffer.
     let draw_grid = |pixels: &mut Vec<u8>, x_off: u32, y_off: u32, w: u32, h: u32| {
         let grid_color = PNG_GRID;
+        // Vertical grid lines.
         for col in 1..T_CELLS as u32 {
-            let x = x_off + col * w / T_CELLS as u32;
-            for y in y_off..y_off + h {
-                let idx = ((y * width + x) * 3) as usize;
-                pixels[idx..idx + 3].copy_from_slice(&grid_color);
+            let cx = x_off + col * w / T_CELLS as u32;
+            for dx in 0..grid_lw {
+                let x = cx + dx - grid_lw / 2;
+                if x >= x_off && x < x_off + w {
+                    for y in y_off..y_off + h {
+                        let idx = ((y * width + x) * 3) as usize;
+                        pixels[idx..idx + 3].copy_from_slice(&grid_color);
+                    }
+                }
             }
         }
+        // Horizontal grid lines.
         for r in 1..V_CELLS as u32 {
-            let y = y_off + r * h / V_CELLS as u32;
-            for x in x_off..x_off + w {
-                let idx = ((y * width + x) * 3) as usize;
-                pixels[idx..idx + 3].copy_from_slice(&grid_color);
+            let cy = y_off + r * h / V_CELLS as u32;
+            for dy in 0..grid_lw {
+                let y = cy + dy - grid_lw / 2;
+                if y >= y_off && y < y_off + h {
+                    for x in x_off..x_off + w {
+                        let idx = ((y * width + x) * 3) as usize;
+                        pixels[idx..idx + 3].copy_from_slice(&grid_color);
+                    }
+                }
             }
         }
     };
 
-    // Helper to draw a trace into a sub-region.
+    // Helper to draw a trace into a sub-region with scaled line thickness.
     let draw_ch =
         |pixels: &mut Vec<u8>, samples: &[u8], color: [u8; 3], x_off: u32, y_off: u32, w: u32, h: u32| {
             let n = samples.len();
@@ -2526,60 +2625,54 @@ fn export_png(path: &std::path::Path, cap: &Capture, settings: &Settings) -> any
                 yf.round().max(0.0).min((h - 1) as f64) as u32
             };
 
-            let mut prev_y = sample_y(0);
-            let idx = (((y_off + prev_y) * width + x_off) * 3) as usize;
-            if idx + 2 < pixels.len() {
-                pixels[idx..idx + 3].copy_from_slice(&color);
+            let mut set_pixel = |px: u32, py: u32| {
+                if py < h {
+                    let idx = (((y_off + py) * width + x_off + px) * 3) as usize;
+                    if idx + 2 < pixels.len() {
+                        pixels[idx..idx + 3].copy_from_slice(&color);
+                    }
+                }
+            };
+
+            // Draw first point with thickness.
+            let first_y = sample_y(0);
+            for dy in -trace_hw..=trace_hw {
+                let yy = (first_y as i32 + dy).max(0) as u32;
+                set_pixel(0, yy);
             }
 
+            let mut prev_y = first_y;
             for px in 1..w {
                 let cur_y = sample_y(px);
                 let y_start = prev_y.min(cur_y);
                 let y_end = prev_y.max(cur_y);
+                // Fill the connecting line with thickness.
                 for y in y_start..=y_end {
-                    let idx = (((y_off + y) * width + x_off + px) * 3) as usize;
-                    if idx + 2 < pixels.len() {
-                        pixels[idx..idx + 3].copy_from_slice(&color);
-                    }
-                }
-                if cur_y > 0 {
-                    let idx = (((y_off + cur_y - 1) * width + x_off + px) * 3) as usize;
-                    if idx + 2 < pixels.len() {
-                        pixels[idx..idx + 3].copy_from_slice(&color);
-                    }
-                }
-                if cur_y + 1 < h {
-                    let idx = (((y_off + cur_y + 1) * width + x_off + px) * 3) as usize;
-                    if idx + 2 < pixels.len() {
-                        pixels[idx..idx + 3].copy_from_slice(&color);
+                    for dy in -trace_hw..=trace_hw {
+                        let yy = (y as i32 + dy).max(0) as u32;
+                        set_pixel(px, yy);
                     }
                 }
                 prev_y = cur_y;
             }
         };
 
-    // Helper to draw scale labels (simple 3x5 digit font).
+    // Helper to draw scale labels (system font when scaled, bitmap glyphs otherwise).
     let t_per_div_ms = settings.t_per_div_ms;
     let draw_scales_on_region =
         |pixels: &mut Vec<u8>, x_off: u32, y_off: u32, w: u32, h: u32, _n_samples: usize,
          vpd_ch1: f64, vo_ch1: f64, ch1_color: Option<[u8; 3]>,
          vpd_ch2: f64, vo_ch2: f64, ch2_color: Option<[u8; 3]>| {
-            // X axis: time labels at bottom
+            // X axis: time labels at bottom (skip last label to avoid overlap).
             let cols = T_CELLS as u32;
             let total_time_ms = T_CELLS as f64 * t_per_div_ms;
-            for i in 0..=cols {
+            for i in 0..cols {
                 let frac = i as f64 / cols as f64;
                 let time_ms = frac * total_time_ms;
                 let label = format_duration_ms_scale(time_ms);
-                // Position: for i=0 left-aligned, for i=cols right-aligned
-                // so the last label doesn't overflow past the graph edge.
-                let x_pos = if i == cols && label.len() > 3 {
-                    x_off + w - (label.len() as u32 * 4)
-                } else {
-                    x_off + i * w / cols + 2
-                };
+                let x_pos = x_off + i * w / cols + 2;
                 let y_pos = y_off + h + 2;
-                draw_text_tiny(pixels, width, height, &label, x_pos, y_pos, PNG_SCALE_TEXT);
+                draw_text_tiny(pixels, width, height, &label, x_pos, y_pos, PNG_SCALE_TEXT, use_system_font, font_size);
             }
 
             // Y axis: voltage labels on left margin, per-channel.
@@ -2591,12 +2684,12 @@ fn export_png(path: &std::path::Path, cap: &Capture, settings: &Settings) -> any
                     let v = ((i + 1) as f64 / rows as f64) * GRID_HEIGHT_PX;
                     let voltage = vo + (ADC_VALUE_MID as f64 - v) * vpd / PX_PER_DIV;
                     let y_pos = y_off + (i * h / rows);
-                    draw_text_tiny(pixels, width, height, &format!("{voltage:.1}"), x_lbl, y_pos, color);
+                    draw_text_tiny(pixels, width, height, &format!("{voltage:.1}"), x_lbl, y_pos, color, use_system_font, font_size);
                 }
             };
 
             let x_ch1 = 2u32;
-            let x_ch2 = if ch1_color.is_some() { 26u32 } else { 2u32 };
+            let x_ch2 = if ch1_color.is_some() { (scale_margin_left as f64 * 0.4).round() as u32 } else { 2u32 };
             if let Some(c) = ch1_color { draw_voltage_label(vpd_ch1, vo_ch1, c, x_ch1); }
             if let Some(c) = ch2_color { draw_voltage_label(vpd_ch2, vo_ch2, c, x_ch2); }
         };
@@ -2653,18 +2746,31 @@ fn export_png(path: &std::path::Path, cap: &Capture, settings: &Settings) -> any
     Ok(())
 }
 
-/// Threshold below which the tiny (3×5) bitmap font is used instead of a system font.
-const TINY_FONT_MAX_HEIGHT: u32 = 1000;
+/// Threshold below which the tiny (3×5) bitmap font is used instead of a system font
+/// (only when `force_system_font` is false).
+const TINY_FONT_MAX_HEIGHT: u32 = 400;
 
 /// Draw text onto a raw RGB pixel buffer.
 ///
-/// Uses the built-in 3×5 bitmap font when `img_height ≤ TINY_FONT_MAX_HEIGHT`,
-/// otherwise renders with the system monospace font via `ab_glyph`.
-fn draw_text_tiny(pixels: &mut [u8], img_width: u32, img_height: u32, text: &str, x: u32, y: u32, color: [u8; 3]) {
-    if img_height <= TINY_FONT_MAX_HEIGHT {
-        draw_tiny_glyph(pixels, img_width, text, x, y, color);
+/// Uses the built-in 3×5 bitmap font when `force_system_font` is false and
+/// `img_height ≤ TINY_FONT_MAX_HEIGHT`, otherwise renders with the system
+/// monospace font via `ab_glyph` at the given `font_size`.
+#[allow(clippy::too_many_arguments)]
+fn draw_text_tiny(
+    pixels: &mut [u8],
+    img_width: u32,
+    img_height: u32,
+    text: &str,
+    x: u32,
+    y: u32,
+    color: [u8; 3],
+    force_system_font: bool,
+    font_size: f32,
+) {
+    if force_system_font || img_height > TINY_FONT_MAX_HEIGHT {
+        draw_system_font(pixels, img_width, text, x, y, color, font_size);
     } else {
-        draw_system_font(pixels, img_width, text, x, y, color);
+        draw_tiny_glyph(pixels, img_width, text, x, y, color);
     }
 }
 
@@ -2692,6 +2798,7 @@ fn draw_tiny_glyph(pixels: &mut [u8], img_width: u32, text: &str, x: u32, y: u32
 /// Render text using a system monospace font via `ab_glyph`.
 /// Render text into an RGB pixel buffer using the operating system's
 /// default monospace font family.
+#[allow(clippy::too_many_arguments)]
 fn draw_system_font(
     pixels: &mut [u8],
     img_width: u32,
@@ -2699,6 +2806,7 @@ fn draw_system_font(
     x: u32,
     y: u32,
     color: [u8; 3],
+    font_size: f32,
 ) {
     use ab_glyph::{Font, FontArc, PxScale, ScaleFont};
     use font_kit::{
@@ -2738,9 +2846,7 @@ fn draw_system_font(
         return;
     };
 
-    const FONT_SIZE: f32 = 11.0;
-
-    let scaled_font = font.as_scaled(PxScale::from(FONT_SIZE));
+    let scaled_font = font.as_scaled(PxScale::from(font_size));
     let baseline = y as f32 + scaled_font.ascent();
 
     let mut cursor_x = x as f32;
@@ -2749,7 +2855,7 @@ fn draw_system_font(
         let glyph_id = font.glyph_id(ch);
 
         let glyph = glyph_id.with_scale_and_position(
-            FONT_SIZE,
+            font_size,
             ab_glyph::point(cursor_x, baseline),
         );
 
@@ -2817,7 +2923,7 @@ fn tiny_glyph(ch: char) -> [u8; 5] {
         '.' => [0b000, 0b000, 0b000, 0b000, 0b010],
         '-' => [0b000, 0b000, 0b111, 0b000, 0b000],
         'V' => [0b101, 0b101, 0b101, 0b101, 0b010],
-        'm' => [0b000, 0b110, 0b101, 0b101, 0b101],
+        'm' => [0b101, 0b111, 0b101, 0b101, 0b101],
         's' => [0b011, 0b100, 0b010, 0b001, 0b110],
         'n' => [0b000, 0b110, 0b101, 0b101, 0b101],
         'µ' => [0b000, 0b101, 0b101, 0b111, 0b100],
@@ -2826,128 +2932,23 @@ fn tiny_glyph(ch: char) -> [u8; 5] {
     }
 }
 
-/// Write an RGB pixel buffer as a PNG file.
-/// Minimal implementation using uncompressed deflate (store blocks).
+/// Write an RGB pixel buffer as a PNG file using the `png` crate with
+/// maximum compression (no quality loss).
 fn write_png(path: &std::path::Path, width: u32, height: u32, rgb: &[u8]) -> anyhow::Result<()> {
-    use std::io::Write;
+    use std::io::BufWriter;
 
-    let mut file = std::fs::File::create(path)?;
+    let file = std::fs::File::create(path)?;
+    let w = BufWriter::new(file);
 
-    // PNG signature
-    file.write_all(&[137, 80, 78, 71, 13, 10, 26, 10])?;
+    let mut encoder = png::Encoder::new(w, width, height);
+    encoder.set_color(png::ColorType::Rgb);
+    encoder.set_depth(png::BitDepth::Eight);
+    encoder.set_compression(png::Compression::Best);
 
-    // IHDR chunk
-    let mut ihdr = Vec::with_capacity(13);
-    ihdr.extend_from_slice(&width.to_be_bytes());
-    ihdr.extend_from_slice(&height.to_be_bytes());
-    ihdr.push(8); // bit depth
-    ihdr.push(2); // color type: RGB
-    ihdr.push(0); // compression
-    ihdr.push(0); // filter
-    ihdr.push(0); // interlace
-    write_png_chunk(&mut file, b"IHDR", &ihdr)?;
-
-    // IDAT chunk — raw image data compressed with deflate (store only).
-    // Each row is: filter_byte(0) + RGB pixels.
-    let row_len = 1 + width as usize * 3;
-    let raw_size = row_len * height as usize;
-
-    // Build the unfiltered image data
-    let mut raw = Vec::with_capacity(raw_size);
-    for y in 0..height as usize {
-        raw.push(0); // filter byte: None
-        let start = y * width as usize * 3;
-        let end = start + width as usize * 3;
-        raw.extend_from_slice(&rgb[start..end]);
-    }
-
-    // Wrap in zlib format (store blocks, no compression)
-    let deflated = zlib_store(&raw);
-    write_png_chunk(&mut file, b"IDAT", &deflated)?;
-
-    // IEND chunk
-    write_png_chunk(&mut file, b"IEND", &[])?;
-
+    let mut writer = encoder.write_header()?;
+    writer.write_image_data(rgb)?;
     Ok(())
 }
-
-fn write_png_chunk(w: &mut dyn std::io::Write, chunk_type: &[u8; 4], data: &[u8]) -> std::io::Result<()> {
-    let len = data.len() as u32;
-    w.write_all(&len.to_be_bytes())?;
-    w.write_all(chunk_type)?;
-    w.write_all(data)?;
-    // CRC32 over type + data
-    let crc = png_crc32(chunk_type, data);
-    w.write_all(&crc.to_be_bytes())?;
-    Ok(())
-}
-
-fn png_crc32(chunk_type: &[u8; 4], data: &[u8]) -> u32 {
-    let mut crc: u32 = 0xFFFF_FFFF;
-    for &b in chunk_type.iter().chain(data.iter()) {
-        let idx = ((crc ^ b as u32) & 0xFF) as usize;
-        crc = CRC_TABLE[idx] ^ (crc >> 8);
-    }
-    crc ^ 0xFFFF_FFFF
-}
-
-/// Wraps data in zlib format using only store (no compression) deflate blocks.
-fn zlib_store(data: &[u8]) -> Vec<u8> {
-    let mut out = Vec::with_capacity(data.len() + 64);
-    // Zlib header: CM=8 (deflate), CINFO=7 (32K window), FCHECK so header%31==0
-    out.push(0x78); // CMF
-    out.push(0x01); // FLG (no dict, level 0; 0x7801 % 31 == 0)
-
-    // Deflate store blocks — max 65535 bytes per block
-    let mut remaining = data;
-    while !remaining.is_empty() {
-        let block_size = remaining.len().min(65535);
-        let is_last = block_size == remaining.len();
-        out.push(if is_last { 0x01 } else { 0x00 }); // BFINAL + BTYPE=00
-        let len = block_size as u16;
-        let nlen = !len;
-        out.extend_from_slice(&len.to_le_bytes());
-        out.extend_from_slice(&nlen.to_le_bytes());
-        out.extend_from_slice(&remaining[..block_size]);
-        remaining = &remaining[block_size..];
-    }
-
-    // Adler-32 checksum
-    let adler = adler32(data);
-    out.extend_from_slice(&adler.to_be_bytes());
-    out
-}
-
-fn adler32(data: &[u8]) -> u32 {
-    let mut a: u32 = 1;
-    let mut b: u32 = 0;
-    for &byte in data {
-        a = (a + byte as u32) % 65521;
-        b = (b + a) % 65521;
-    }
-    (b << 16) | a
-}
-
-// CRC32 lookup table for PNG
-const CRC_TABLE: [u32; 256] = {
-    let mut table = [0u32; 256];
-    let mut n = 0usize;
-    while n < 256 {
-        let mut c = n as u32;
-        let mut k = 0;
-        while k < 8 {
-            if c & 1 != 0 {
-                c = 0xEDB8_8320 ^ (c >> 1);
-            } else {
-                c >>= 1;
-            }
-            k += 1;
-        }
-        table[n] = c;
-        n += 1;
-    }
-    table
-};
 
 // ── Tests ──────────────────────────────────────────────────────────────────
 
@@ -3053,20 +3054,6 @@ mod tests {
     fn samples_to_time_conversion() {
         let ms = samples_to_time_ms(1000);
         assert!((ms - 1.0).abs() < 0.01);
-    }
-
-    #[test]
-    fn png_crc32_is_deterministic() {
-        let crc1 = png_crc32(b"IHDR", &[0u8; 13]);
-        let crc2 = png_crc32(b"IHDR", &[0u8; 13]);
-        assert_eq!(crc1, crc2);
-    }
-
-    #[test]
-    fn adler32_known_value() {
-        // adler32 of "Wikipedia" = 0x11E60398
-        let result = adler32(b"Wikipedia");
-        assert_eq!(result, 0x11E6_0398);
     }
 
     #[test]
