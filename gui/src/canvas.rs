@@ -324,12 +324,13 @@ fn draw_grid(frame: &mut Frame, size: Size, margin_left: f32, margin_bottom: f32
     let rows = V_CELLS;
     let gw = size.width - margin_left;
     let dx = gw / cols as f32;
-    let dy = (size.height - margin_bottom) / rows as f32;
+    let graph_height = size.height - margin_bottom;
+    let dy = graph_height / rows as f32;
 
     let stroke = Stroke::default().with_color(GRID).with_width(1.0);
     for i in 0..cols {
         let x = margin_left + i as f32 * dx;
-        let p = Path::line(Point::new(x, 0.0), Point::new(x, size.height));
+        let p = Path::line(Point::new(x, 0.0), Point::new(x, graph_height));
         frame.stroke(&p, stroke);
     }
     for i in 1..rows+1 {
@@ -340,9 +341,9 @@ fn draw_grid(frame: &mut Frame, size: Size, margin_left: f32, margin_bottom: f32
     // Centerlines.
     let axis = Stroke::default().with_color(GRID_AXIS).with_width(1.5);
     let cx = margin_left + gw / 2.0;
-    let cy = size.height / 2.0;
+    let cy = graph_height / 2.0;
     frame.stroke(
-        &Path::line(Point::new(cx, 0.0), Point::new(cx, size.height)),
+        &Path::line(Point::new(cx, 0.0), Point::new(cx, graph_height)),
         axis,
     );
     frame.stroke(
