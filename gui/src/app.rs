@@ -2523,22 +2523,24 @@ impl PngExportConfig {
     }
 
     fn scale_margin_left(&self, show: bool) -> u32 {
-        if show { (65.0 * self.scale()).round() as u32 } else { 0 }
+        if show {
+            ((65.0 * self.scale()).round() as u32).max(52)
+        } else {
+            0
+        }
     }
 
     fn scale_margin_bottom(&self, show: bool) -> u32 {
         if show { (16.0 * self.scale()).round() as u32 } else { 0 }
     }
 
-    fn grid_line_width(&self) -> u32 {
-        let s = self.scale();
-        if s > 2.0 { 2 } else { 1 }
+    fn grid_width(&self) -> f32 {
+        (0.75 * self.scale().sqrt() as f32).clamp(0.75, 2.0)
     }
 
-    /// Half-width of the trace line (pixels above/below centre).
-    /// Scales proportionally to image width, ceiled to whole pixels.
-    fn trace_half_width(&self) -> i32 {
-        (self.scale() * 0.8).ceil() as i32
+    /// Full line width for the trace in pixels.
+    fn trace_width(&self) -> f32 {
+        (1.25 * self.scale().sqrt() as f32).clamp(1.0, 4.0)
     }
 
     fn use_system_font(&self) -> bool {
@@ -2569,101 +2571,50 @@ fn export_png(path: &std::path::Path, cap: &Capture, settings: &Settings) -> any
         graph_h + scale_margin_bottom
     };
 
-    let mut pixels = vec![0u8; (width * height * 3) as usize];
-    for chunk in pixels.chunks_exact_mut(3) {
-        chunk.copy_from_slice(&PNG_BG);
+    // RGBA pixel buffer for tiny-skia.
+    let mut pixels = vec![0u8; (width * height * 4) as usize];
+    for chunk in pixels.chunks_exact_mut(4) {
+        chunk.copy_from_slice(&[PNG_BG[0], PNG_BG[1], PNG_BG[2], 255]);
     }
 
-    let use_system_font = config.use_system_font();
-    let grid_lw = config.grid_line_width();
-    let trace_hw = config.trace_half_width();
+    // Disable anti-aliasing at very low resolution to keep a crisp look.
+    let antialias = graph_w >= 400;
+    // Tie system-font choice to antialias: use the aliased bitmap glyph when
+    // anti-aliasing is off, so text stays crisp and fits the narrow margins.
+    let use_system_font = config.use_system_font() && antialias;
     let font_size = config.font_size();
+    let trace_w = config.trace_width();
+    // When anti-aliasing is off, sub-pixel strokes may not render; ensure a
+    // minimum visible width.
+    let grid_w = if antialias { config.grid_width() } else { config.grid_width().max(1.0) };
+    let smooth = settings.view_mode == ViewMode::Smooth;
+    let dot_mode = settings.view_mode == ViewMode::Dot;
+    let dot_radius = (trace_w * 0.6).max(1.0);
 
-    // Helper to draw a grid into a sub-region of the pixel buffer.
-    let draw_grid = |pixels: &mut Vec<u8>, x_off: u32, y_off: u32, w: u32, h: u32| {
-        let grid_color = PNG_GRID;
-        // Vertical grid lines.
-        for col in 1..T_CELLS as u32 {
-            let cx = x_off + col * w / T_CELLS as u32;
-            for dx in 0..grid_lw {
-                let x = cx + dx - grid_lw / 2;
-                if x >= x_off && x < x_off + w {
-                    for y in y_off..y_off + h {
-                        let idx = ((y * width + x) * 3) as usize;
-                        pixels[idx..idx + 3].copy_from_slice(&grid_color);
-                    }
-                }
-            }
-        }
-        // Horizontal grid lines.
-        for r in 1..V_CELLS as u32 {
-            let cy = y_off + r * h / V_CELLS as u32;
-            for dy in 0..grid_lw {
-                let y = cy + dy - grid_lw / 2;
-                if y >= y_off && y < y_off + h {
-                    for x in x_off..x_off + w {
-                        let idx = ((y * width + x) * 3) as usize;
-                        pixels[idx..idx + 3].copy_from_slice(&grid_color);
-                    }
-                }
-            }
-        }
+    // ── Grid helper via tiny-skia ────────────────────────────────────
+    let draw_grid_on = |pixels: &mut [u8], y_off: u32| {
+        let Some(grid_path) = build_grid_path(scale_margin_left, y_off, graph_w, graph_h) else {
+            return;
+        };
+        let Some(mut pixmap) = tiny_skia::PixmapMut::from_bytes(pixels, width, height) else {
+            return;
+        };
+        let mut paint = tiny_skia::Paint::default();
+        paint.set_color(rgb_color(PNG_GRID));
+        paint.anti_alias = antialias;
+        let stroke = tiny_skia::Stroke {
+            width: grid_w,
+            ..tiny_skia::Stroke::default()
+        };
+        pixmap.stroke_path(&grid_path, &paint, &stroke, tiny_skia::Transform::identity(), None);
     };
 
-    // Helper to draw a trace into a sub-region with scaled line thickness.
-    let draw_ch =
-        |pixels: &mut Vec<u8>, samples: &[u8], color: [u8; 3], x_off: u32, y_off: u32, w: u32, h: u32| {
-            let n = samples.len();
-            if n == 0 {
-                return;
-            }
-            let sample_y = |px: u32| -> u32 {
-                let i = (px as f64 / w as f64 * (n - 1) as f64) as usize;
-                let v = samples[i.min(n - 1)];
-                // Match draw_trace: subtract PX_PER_DIV so v=25 maps to y=0 (top).
-                let yf = ((v as f64 - PX_PER_DIV) / GRID_HEIGHT_PX) * (h - 1) as f64;
-                yf.round().max(0.0).min((h - 1) as f64) as u32
-            };
-
-            let mut set_pixel = |px: u32, py: u32| {
-                if py < h {
-                    let idx = (((y_off + py) * width + x_off + px) * 3) as usize;
-                    if idx + 2 < pixels.len() {
-                        pixels[idx..idx + 3].copy_from_slice(&color);
-                    }
-                }
-            };
-
-            // Draw first point with thickness.
-            let first_y = sample_y(0);
-            for dy in -trace_hw..=trace_hw {
-                let yy = (first_y as i32 + dy).max(0) as u32;
-                set_pixel(0, yy);
-            }
-
-            let mut prev_y = first_y;
-            for px in 1..w {
-                let cur_y = sample_y(px);
-                let y_start = prev_y.min(cur_y);
-                let y_end = prev_y.max(cur_y);
-                // Fill the connecting line with thickness.
-                for y in y_start..=y_end {
-                    for dy in -trace_hw..=trace_hw {
-                        let yy = (y as i32 + dy).max(0) as u32;
-                        set_pixel(px, yy);
-                    }
-                }
-                prev_y = cur_y;
-            }
-        };
-
-    // Helper to draw scale labels (system font when scaled, bitmap glyphs otherwise).
+    // ── Scale labels (unchanged, uses existing text renderer) ─────────
     let t_per_div_ms = settings.t_per_div_ms;
     let draw_scales_on_region =
-        |pixels: &mut Vec<u8>, x_off: u32, y_off: u32, w: u32, h: u32, _n_samples: usize,
+        |pixels: &mut [u8], x_off: u32, y_off: u32, w: u32, h: u32, _n_samples: usize,
          vpd_ch1: f64, vo_ch1: f64, ch1_color: Option<[u8; 3]>,
          vpd_ch2: f64, vo_ch2: f64, ch2_color: Option<[u8; 3]>| {
-            // X axis: time labels at bottom (skip last label to avoid overlap).
             let cols = T_CELLS as u32;
             let total_time_ms = T_CELLS as f64 * t_per_div_ms;
             for i in 0..cols {
@@ -2672,19 +2623,17 @@ fn export_png(path: &std::path::Path, cap: &Capture, settings: &Settings) -> any
                 let label = format_duration_ms_scale(time_ms);
                 let x_pos = x_off + i * w / cols + 2;
                 let y_pos = y_off + h + 2;
-                draw_text_tiny(pixels, width, height, &label, x_pos, y_pos, PNG_SCALE_TEXT, use_system_font, font_size);
+                draw_text_tiny(pixels, width, &label, x_pos, y_pos, PNG_SCALE_TEXT, use_system_font, font_size);
             }
 
             // Y axis: voltage labels on left margin, per-channel.
-            // Formula from pixel_to_volts: V = V_offset + (ADC_MID - v) × V/div / PX_PER_DIV.
-            // Match draw_scales: use (i+1) offset so v=25 maps to top label.
             let rows = V_CELLS as u32;
             let mut draw_voltage_label = |vpd: f64, vo: f64, color: [u8; 3], x_lbl: u32| {
                 for i in 0..=rows {
                     let v = ((i + 1) as f64 / rows as f64) * GRID_HEIGHT_PX;
                     let voltage = vo + (ADC_VALUE_MID as f64 - v) * vpd / PX_PER_DIV;
                     let y_pos = y_off + (i * h / rows);
-                    draw_text_tiny(pixels, width, height, &format!("{voltage:.1}"), x_lbl, y_pos, color, use_system_font, font_size);
+                    draw_text_tiny(pixels, width, &format!("{voltage:.1}"), x_lbl, y_pos, color, use_system_font, font_size);
                 }
             };
 
@@ -2694,41 +2643,57 @@ fn export_png(path: &std::path::Path, cap: &Capture, settings: &Settings) -> any
             if let Some(c) = ch2_color { draw_voltage_label(vpd_ch2, vo_ch2, c, x_ch2); }
         };
 
-    // Draw one channel into a region: grid + trace + optional scale labels.
-    let mut draw_one = |samples: &[u8], trace_color: [u8; 3],
+    // ── Draw one subimage region ─────────────────────────────────────
+    let draw_one = |pixels: &mut [u8], samples: &[u8], trace_color: [u8; 3],
                     y_off: u32, vpd: f64, vo: f64, ch_col: Option<[u8; 3]>| {
-        draw_grid(&mut pixels, scale_margin_left, y_off, graph_w, graph_h);
+        draw_grid_on(pixels, y_off);
         if !samples.is_empty() {
-            draw_ch(&mut pixels, samples, trace_color, scale_margin_left, y_off, graph_w, graph_h);
+            if dot_mode {
+                draw_dots(pixels, width, height, samples, trace_color,
+                          scale_margin_left, y_off, graph_w, graph_h, dot_radius, antialias);
+            } else {
+                draw_trace(pixels, width, height, samples, trace_color,
+                           scale_margin_left, y_off, graph_w, graph_h, trace_w, smooth, antialias);
+            }
         }
         if let Some(c) = ch_col {
             draw_scales_on_region(
-                &mut pixels, scale_margin_left, y_off, graph_w, graph_h, samples.len(),
+                pixels, scale_margin_left, y_off, graph_w, graph_h, samples.len(),
                 vpd, vo, Some(c), 0.0, 0.0, None,
             );
         }
     };
 
     if do_split {
-        // Upper subimage: CH1
         let ch1_col = settings.show_scales.then_some(PNG_CH1);
-        draw_one(&cap.ch1, PNG_CH1, 0, settings.v_per_div_ch1, settings.v_offset_ch1, ch1_col);
+        draw_one(&mut pixels, &cap.ch1, PNG_CH1, 0,
+                 settings.v_per_div_ch1, settings.v_offset_ch1, ch1_col);
 
-        // Lower subimage: CH2
         let ch2_col = settings.show_scales.then_some(PNG_CH2);
         if let Some(ch2) = &cap.ch2 {
-            draw_one(ch2, PNG_CH2, graph_h + scale_margin_bottom,
+            draw_one(&mut pixels, ch2, PNG_CH2, graph_h + scale_margin_bottom,
                      settings.v_per_div_ch2, settings.v_offset_ch2, ch2_col);
         }
     } else {
-        // Single combined image
-        draw_grid(&mut pixels, scale_margin_left, 0, graph_w, graph_h);
+        draw_grid_on(&mut pixels, 0);
         if settings.show_ch1 {
-            draw_ch(&mut pixels, &cap.ch1, PNG_CH1, scale_margin_left, 0, graph_w, graph_h);
+            if dot_mode {
+                draw_dots(&mut pixels, width, height, &cap.ch1, PNG_CH1,
+                          scale_margin_left, 0, graph_w, graph_h, dot_radius, antialias);
+            } else {
+                draw_trace(&mut pixels, width, height, &cap.ch1, PNG_CH1,
+                           scale_margin_left, 0, graph_w, graph_h, trace_w, smooth, antialias);
+            }
         }
         if settings.show_ch2 {
             if let Some(ch2) = &cap.ch2 {
-                draw_ch(&mut pixels, ch2, PNG_CH2, scale_margin_left, 0, graph_w, graph_h);
+                if dot_mode {
+                    draw_dots(&mut pixels, width, height, ch2, PNG_CH2,
+                              scale_margin_left, 0, graph_w, graph_h, dot_radius, antialias);
+                } else {
+                    draw_trace(&mut pixels, width, height, ch2, PNG_CH2,
+                               scale_margin_left, 0, graph_w, graph_h, trace_w, smooth, antialias);
+                }
             }
         }
         if settings.show_scales {
@@ -2746,20 +2711,210 @@ fn export_png(path: &std::path::Path, cap: &Capture, settings: &Settings) -> any
     Ok(())
 }
 
-/// Threshold below which the tiny (3×5) bitmap font is used instead of a system font
-/// (only when `force_system_font` is false).
-const TINY_FONT_MAX_HEIGHT: u32 = 400;
+// ── tiny-skia helper functions ─────────────────────────────────────────────
 
-/// Draw text onto a raw RGB pixel buffer.
+fn rgb_color(rgb: [u8; 3]) -> tiny_skia::Color {
+    tiny_skia::Color::from_rgba8(rgb[0], rgb[1], rgb[2], 255)
+}
+
+/// Resample waveform samples into a sequence of (x, y) points for the output
+/// graph region.  Upscaling uses linear interpolation; downscaling preserves
+/// the min/max envelope per output column.
+fn resample_waveform(
+    samples: &[u8],
+    output_width: u32,
+    output_height: u32,
+) -> Vec<(f32, f32)> {
+    let n = samples.len();
+    if n == 0 || output_width == 0 || output_height == 0 {
+        return Vec::new();
+    }
+
+    let y_scale = (output_height - 1) as f64 / GRID_HEIGHT_PX;
+
+    let map_y = |sample: f64| -> f32 {
+        let y = ((sample - PX_PER_DIV) * y_scale)
+            .clamp(0.0, (output_height - 1) as f64);
+        y as f32
+    };
+
+    // Upscaling: linear interpolation between source samples.
+    if output_width as usize >= n {
+        let mut points = Vec::with_capacity(output_width as usize);
+        for x in 0..output_width {
+            let source_pos = x as f64 * (n - 1) as f64 / (output_width - 1).max(1) as f64;
+            let left = source_pos.floor() as usize;
+            let right = (left + 1).min(n - 1);
+            let t = source_pos - left as f64;
+            let sample = samples[left] as f64 * (1.0 - t) + samples[right] as f64 * t;
+            points.push((x as f32, map_y(sample)));
+        }
+        return points;
+    }
+
+    // Downscaling: min/max envelope per column.
+    let mut points = Vec::with_capacity(output_width as usize * 2);
+    for x in 0..output_width {
+        let start = x as usize * n / output_width as usize;
+        let end = ((x + 1) as usize * n / output_width as usize)
+            .max(start + 1)
+            .min(n);
+        let col = &samples[start..end];
+        let min = *col.iter().min().unwrap() as f64;
+        let max = *col.iter().max().unwrap() as f64;
+        let y_min = map_y(min);
+        let y_max = map_y(max);
+        // Preserve temporal direction.
+        if col.first() <= col.last() {
+            points.push((x as f32, y_min));
+            points.push((x as f32, y_max));
+        } else {
+            points.push((x as f32, y_max));
+            points.push((x as f32, y_min));
+        }
+    }
+    points
+}
+
+/// Build an anti-aliased grid path via tiny-skia.
+fn build_grid_path(
+    x_off: u32,
+    y_off: u32,
+    width: u32,
+    height: u32,
+) -> Option<tiny_skia::Path> {
+    let mut path = tiny_skia::PathBuilder::new();
+    for col in 1..T_CELLS as u32 {
+        let x = x_off as f32 + col as f32 * width as f32 / T_CELLS as f32;
+        path.move_to(x, y_off as f32);
+        path.line_to(x, (y_off + height) as f32);
+    }
+    for row in 1..V_CELLS as u32 {
+        let y = y_off as f32 + row as f32 * height as f32 / V_CELLS as f32;
+        path.move_to(x_off as f32, y);
+        path.line_to((x_off + width) as f32, y);
+    }
+    path.finish()
+}
+
+/// Append a smooth Catmull–Rom curve segment (converted to cubic Bézier)
+/// for each consecutive pair of points.
+fn append_catmull_rom_path(
+    path: &mut tiny_skia::PathBuilder,
+    points: &[(f32, f32)],
+    x_off: u32,
+    y_off: u32,
+) {
+    let ox = x_off as f32;
+    let oy = y_off as f32;
+    for i in 0..points.len() - 1 {
+        let p0 = if i == 0 { points[i] } else { points[i - 1] };
+        let p1 = points[i];
+        let p2 = points[i + 1];
+        let p3 = if i + 2 < points.len() { points[i + 2] } else { p2 };
+        // Catmull-Rom → cubic Bézier with tension 0.5.
+        let c1 = (p1.0 + (p2.0 - p0.0) / 6.0, p1.1 + (p2.1 - p0.1) / 6.0);
+        let c2 = (p2.0 - (p3.0 - p1.0) / 6.0, p2.1 - (p3.1 - p1.1) / 6.0);
+        path.cubic_to(ox + c1.0, oy + c1.1, ox + c2.0, oy + c2.1, ox + p2.0, oy + p2.1);
+    }
+}
+
+/// Draw an anti-aliased trace via tiny-skia.
+#[allow(clippy::too_many_arguments)]
+fn draw_trace(
+    pixels: &mut [u8],
+    image_width: u32,
+    image_height: u32,
+    samples: &[u8],
+    color: [u8; 3],
+    x_off: u32,
+    y_off: u32,
+    width: u32,
+    height: u32,
+    line_width: f32,
+    smooth: bool,
+    antialias: bool,
+) {
+    if samples.len() < 2 || width < 2 || height < 2 {
+        return;
+    }
+    let Some(mut pixmap) = tiny_skia::PixmapMut::from_bytes(pixels, image_width, image_height) else {
+        return;
+    };
+    let points = resample_waveform(samples, width, height);
+    if points.len() < 2 {
+        return;
+    }
+    let mut path_builder = tiny_skia::PathBuilder::new();
+    let first = points[0];
+    path_builder.move_to(x_off as f32 + first.0, y_off as f32 + first.1);
+    if smooth && points.len() >= 4 {
+        append_catmull_rom_path(&mut path_builder, &points, x_off, y_off);
+    } else {
+        for &(x, y) in &points[1..] {
+            path_builder.line_to(x_off as f32 + x, y_off as f32 + y);
+        }
+    }
+    let Some(path) = path_builder.finish() else { return; };
+    let mut paint = tiny_skia::Paint::default();
+    paint.set_color(rgb_color(color));
+    paint.anti_alias = antialias;
+    let stroke = tiny_skia::Stroke {
+        width: line_width,
+        line_cap: tiny_skia::LineCap::Round,
+        line_join: tiny_skia::LineJoin::Round,
+        ..tiny_skia::Stroke::default()
+    };
+    pixmap.stroke_path(&path, &paint, &stroke, tiny_skia::Transform::identity(), None);
+}
+
+/// Draw dots via tiny-skia (Dot mode). Each dot is a small filled circle.
+#[allow(clippy::too_many_arguments)]
+fn draw_dots(
+    pixels: &mut [u8],
+    image_width: u32,
+    image_height: u32,
+    samples: &[u8],
+    color: [u8; 3],
+    x_off: u32,
+    y_off: u32,
+    width: u32,
+    height: u32,
+    dot_radius: f32,
+    antialias: bool,
+) {
+    let n = samples.len();
+    if n == 0 || width < 2 || height < 2 {
+        return;
+    }
+    let Some(mut pixmap) = tiny_skia::PixmapMut::from_bytes(pixels, image_width, image_height) else {
+        return;
+    };
+    let y_scale = (height - 1) as f64 / GRID_HEIGHT_PX;
+    let step = n.div_ceil(width.max(1) as usize).max(1);
+    let mut paint = tiny_skia::Paint::default();
+    paint.set_color(rgb_color(color));
+    paint.anti_alias = antialias;
+    for i in (0..n).step_by(step) {
+        let x = x_off as f32 + (i as f64 / (n - 1).max(1) as f64 * width as f64) as f32;
+        let sample = samples[i] as f64;
+        let y = y_off as f32 + ((sample - PX_PER_DIV) * y_scale)
+            .clamp(0.0, (height - 1) as f64) as f32;
+        let Some(circle) = tiny_skia::PathBuilder::from_circle(x, y, dot_radius) else { continue; };
+        pixmap.fill_path(&circle, &paint, tiny_skia::FillRule::Winding,
+                         tiny_skia::Transform::identity(), None);
+    }
+}
+
+/// Draw text onto a raw RGBA pixel buffer.
 ///
-/// Uses the built-in 3×5 bitmap font when `force_system_font` is false and
-/// `img_height ≤ TINY_FONT_MAX_HEIGHT`, otherwise renders with the system
-/// monospace font via `ab_glyph` at the given `font_size`.
+/// Uses the built-in 3×5 bitmap font when `force_system_font` is false,
+/// otherwise renders with the system monospace font via `ab_glyph` at the
+/// given `font_size`.
 #[allow(clippy::too_many_arguments)]
 fn draw_text_tiny(
     pixels: &mut [u8],
     img_width: u32,
-    img_height: u32,
     text: &str,
     x: u32,
     y: u32,
@@ -2767,14 +2922,15 @@ fn draw_text_tiny(
     force_system_font: bool,
     font_size: f32,
 ) {
-    if force_system_font || img_height > TINY_FONT_MAX_HEIGHT {
+    if force_system_font {
         draw_system_font(pixels, img_width, text, x, y, color, font_size);
     } else {
         draw_tiny_glyph(pixels, img_width, text, x, y, color);
     }
 }
 
-/// Render text with the built-in 3×5 bitmap font.
+/// Render text with the built-in 3×5 bitmap font.  Each font pixel maps to
+/// exactly one output pixel — no scaling, no anti-aliasing.
 fn draw_tiny_glyph(pixels: &mut [u8], img_width: u32, text: &str, x: u32, y: u32, color: [u8; 3]) {
     let mut cx = x;
     for ch in text.chars() {
@@ -2784,9 +2940,10 @@ fn draw_tiny_glyph(pixels: &mut [u8], img_width: u32, text: &str, x: u32, y: u32
                 if glyph[row as usize] & (1 << (2 - col)) != 0 {
                     let px = cx + col;
                     let py = y + row;
-                    let idx = ((py * img_width + px) * 3) as usize;
-                    if idx + 2 < pixels.len() {
+                    let idx = ((py * img_width + px) * 4) as usize;
+                    if idx + 3 < pixels.len() {
                         pixels[idx..idx + 3].copy_from_slice(&color);
+                        pixels[idx + 3] = 255;
                     }
                 }
             }
@@ -2878,9 +3035,9 @@ fn draw_system_font(
                 }
 
                 let index =
-                    (pixel_y as usize * img_width as usize + pixel_x as usize) * 3;
+                    (pixel_y as usize * img_width as usize + pixel_x as usize) * 4;
 
-                let Some(destination) = pixels.get_mut(index..index + 3) else {
+                let Some(destination) = pixels.get_mut(index..index + 4) else {
                     return;
                 };
 
@@ -2892,7 +3049,7 @@ fn draw_system_font(
     }
 }
 
-/// Alpha-blend one RGB color over another.
+/// Alpha-blend one RGB color over an RGBA destination pixel.
 fn blend_rgb(destination: &mut [u8], foreground: [u8; 3], alpha: f32) {
     let alpha = alpha.clamp(0.0, 1.0);
     let inverse_alpha = 1.0 - alpha;
@@ -2905,6 +3062,7 @@ fn blend_rgb(destination: &mut [u8], foreground: [u8; 3], alpha: f32) {
             .round()
             .clamp(0.0, 255.0) as u8;
     }
+    destination[3] = 255;
 }
 
 /// Returns a 5-row bitmask (3 bits wide) for a character.
@@ -2932,21 +3090,21 @@ fn tiny_glyph(ch: char) -> [u8; 5] {
     }
 }
 
-/// Write an RGB pixel buffer as a PNG file using the `png` crate with
+/// Write an RGBA pixel buffer as a PNG file using the `png` crate with
 /// maximum compression (no quality loss).
-fn write_png(path: &std::path::Path, width: u32, height: u32, rgb: &[u8]) -> anyhow::Result<()> {
+fn write_png(path: &std::path::Path, width: u32, height: u32, rgba: &[u8]) -> anyhow::Result<()> {
     use std::io::BufWriter;
 
     let file = std::fs::File::create(path)?;
     let w = BufWriter::new(file);
 
     let mut encoder = png::Encoder::new(w, width, height);
-    encoder.set_color(png::ColorType::Rgb);
+    encoder.set_color(png::ColorType::Rgba);
     encoder.set_depth(png::BitDepth::Eight);
     encoder.set_compression(png::Compression::Best);
 
     let mut writer = encoder.write_header()?;
-    writer.write_image_data(rgb)?;
+    writer.write_image_data(rgba)?;
     Ok(())
 }
 
