@@ -1,6 +1,4 @@
 //! Oscilloscope-style graph canvas (iced::widget::canvas).
-
-use crate::app::{format_duration_ms_scale};
 use crate::settings::ViewMode;
 use dso_parser::{ADC_VALUE_MID, Capture};
 use iced::widget::canvas::{self, Frame, Geometry, Path, Stroke, Text};
@@ -576,5 +574,19 @@ impl<Message> canvas::Program<Message> for Thumbnail<'_> {
         } else {
             mouse::Interaction::default()
         }
+    }
+}
+
+// ── Time formatting utilities ──────────────────────────────────────────────
+
+/// Compact time-duration formatting for scale labels: ms with 0.1 precision,
+/// µs/ns with .0.
+pub fn format_duration_ms_scale(ms: f64) -> String {
+    if ms >= 1.0 {
+        format!("{ms:.1}ms")
+    } else if ms >= 0.001 {
+        format!("{:.0}µs", ms * 1000.0)
+    } else {
+        format!("{:.0}ns", ms * 1_000_000.0)
     }
 }

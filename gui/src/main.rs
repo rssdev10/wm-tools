@@ -4,6 +4,7 @@ rust_i18n::i18n!("locales", fallback = "en");
 
 mod app;
 mod canvas;
+mod export_image;
 mod flash;
 mod i18n;
 mod logging;
