@@ -244,9 +244,32 @@ fn rgb_color(rgb: [u8; 3]) -> tiny_skia::Color {
     tiny_skia::Color::from_rgba8(rgb[0], rgb[1], rgb[2], 255)
 }
 
-/// Resample waveform samples into a sequence of (x, y) points for the output
-/// graph region.  Upscaling uses linear interpolation; downscaling preserves
-/// the min/max envelope per output column.
+#[inline]
+fn waveform_y(sample: f64, height: u32) -> f32 {
+    let y_scale = (height - 1) as f64 / GRID_HEIGHT_PX;
+    ((sample - PX_PER_DIV) * y_scale) as f32
+}
+
+#[inline]
+fn is_visible_y(y: f32, height: u32) -> bool {
+    (0.0..=(height - 1) as f32).contains(&y)
+}
+
+#[inline]
+fn border_y(y: f32, height: u32) -> f32 {
+    if y < 0.0 {
+        0.0
+    } else {
+        (height - 1) as f32
+    }
+}
+
+/// Resample waveform samples into unclamped `(x, y)` points for the output
+/// graph region. Keeping Y unclamped allows each renderer to distinguish real
+/// border values from samples that are outside the visible voltage range.
+///
+/// Upscaling uses linear interpolation. Downscaling preserves the min/max
+/// envelope per output column.
 fn resample_waveform(
     samples: &[u8],
     output_width: u32,
@@ -257,13 +280,9 @@ fn resample_waveform(
         return Vec::new();
     }
 
-    let y_scale = (output_height - 1) as f64 / GRID_HEIGHT_PX;
-
-    let map_y = |sample: f64| -> f32 {
-        let y = ((sample - PX_PER_DIV) * y_scale)
-            .clamp(0.0, (output_height - 1) as f64);
-        y as f32
-    };
+    // Keep the unclamped Y coordinate here. draw_trace() needs to know whether
+    // each resampled point is genuinely inside or outside the visible mesh.
+    let map_y = |sample: f64| waveform_y(sample, output_height);
 
     // Upscaling: linear interpolation between source samples.
     if output_width as usize >= n {
@@ -291,6 +310,7 @@ fn resample_waveform(
         let max = *col.iter().max().unwrap() as f64;
         let y_min = map_y(min);
         let y_max = map_y(max);
+
         // Preserve temporal direction.
         if col.first() <= col.last() {
             points.push((x as f32, y_min));
@@ -372,17 +392,23 @@ fn draw_trace(
     if points.len() < 2 {
         return;
     }
-    let mut path_builder = tiny_skia::PathBuilder::new();
-    let first = points[0];
-    path_builder.move_to(x_off as f32 + first.0, y_off as f32 + first.1);
-    if smooth && points.len() >= 4 {
-        append_catmull_rom_path(&mut path_builder, &points, x_off, y_off);
-    } else {
-        for &(x, y) in &points[1..] {
-            path_builder.line_to(x_off as f32 + x, y_off as f32 + y);
+
+    // An outside point is retained only when it is adjacent to an inside
+    // point. In that case it is moved onto the corresponding top/bottom mesh
+    // border. Outside runs therefore remain hidden, while the visible line or
+    // smooth curve still reaches the border before disappearing/reappearing.
+    let clipped_points = points.iter().enumerate().map(|(i, &(x, y))| {
+        if is_visible_y(y, height) {
+            return Some((x, y));
         }
-    }
-    let Some(path) = path_builder.finish() else { return; };
+
+        let previous_inside = i > 0 && is_visible_y(points[i - 1].1, height);
+        let next_inside = i + 1 < points.len()
+            && is_visible_y(points[i + 1].1, height);
+
+        (previous_inside || next_inside).then(|| (x, border_y(y, height)))
+    });
+
     let mut paint = tiny_skia::Paint::default();
     paint.set_color(rgb_color(color));
     paint.anti_alias = antialias;
@@ -392,10 +418,51 @@ fn draw_trace(
         line_join: tiny_skia::LineJoin::Round,
         ..tiny_skia::Stroke::default()
     };
-    pixmap.stroke_path(&path, &paint, &stroke, tiny_skia::Transform::identity(), None);
+
+    let draw_run = |pixmap: &mut tiny_skia::PixmapMut<'_>, run: &[(f32, f32)]| {
+        if run.len() < 2 {
+            return;
+        }
+
+        let mut path_builder = tiny_skia::PathBuilder::new();
+        let first = run[0];
+        path_builder.move_to(x_off as f32 + first.0, y_off as f32 + first.1);
+
+        if smooth && run.len() >= 4 {
+            append_catmull_rom_path(&mut path_builder, run, x_off, y_off);
+        } else {
+            for &(x, y) in &run[1..] {
+                path_builder.line_to(x_off as f32 + x, y_off as f32 + y);
+            }
+        }
+
+        if let Some(path) = path_builder.finish() {
+            pixmap.stroke_path(
+                &path,
+                &paint,
+                &stroke,
+                tiny_skia::Transform::identity(),
+                None,
+            );
+        }
+    };
+
+    let mut run = Vec::new();
+    for point in clipped_points {
+        match point {
+            Some(point) => run.push(point),
+            None => {
+                draw_run(&mut pixmap, &run);
+                run.clear();
+            }
+        }
+    }
+    draw_run(&mut pixmap, &run);
 }
 
-/// Draw dots via tiny-skia (Dot mode). Each dot is a small filled circle.
+/// Draw dots via tiny-skia (Dot mode). Each visible sample is rendered as a
+/// small filled circle. Samples outside the vertical mesh range are skipped;
+/// unlike line/smooth modes, dot mode never creates synthetic border points.
 ///
 /// When anti-aliasing is disabled, dots are drawn as individual pixels
 /// directly into the RGBA buffer — no scaling, no smoothing, no sub-pixel
@@ -418,43 +485,55 @@ fn draw_dots(
     if n == 0 || width < 2 || height < 2 {
         return;
     }
-    let y_scale = (height - 1) as f64 / GRID_HEIGHT_PX;
-    let step = n.div_ceil(width.max(1) as usize).max(1);
+
+    let step = n.div_ceil(width as usize).max(1);
+    let sample_points = (0..n).step_by(step).filter_map(|i| {
+        let y = waveform_y(samples[i] as f64, height);
+        is_visible_y(y, height).then(|| {
+            let x = i as f64 / (n - 1).max(1) as f64 * width as f64;
+            (x as f32, y)
+        })
+    });
 
     if !antialias {
-        // Aliased path: set individual pixels directly — no circles, no
-        // sub-pixel blending, no scaling.
-        for i in (0..n).step_by(step) {
-            let x = x_off
-                + (i as f64 / (n - 1).max(1) as f64 * width as f64).round() as u32;
-            let sample = samples[i] as f64;
-            let y = y_off
-                + ((sample - PX_PER_DIV) * y_scale)
-                    .round()
-                    .clamp(0.0, (height - 1) as f64) as u32;
-            let idx = (y as usize * image_width as usize + x as usize) * 4;
-            if idx + 3 < pixels.len() {
-                pixels[idx..idx + 3].copy_from_slice(&color);
-                pixels[idx + 3] = 255;
+        for (x, y) in sample_points {
+            let px = x_off + x.round() as u32;
+            let py = y_off + y.round() as u32;
+            let idx = (py as usize * image_width as usize + px as usize) * 4;
+            if let Some(pixel) = pixels.get_mut(idx..idx + 4) {
+                pixel[..3].copy_from_slice(&color);
+                pixel[3] = 255;
             }
         }
         return;
     }
 
-    let Some(mut pixmap) = tiny_skia::PixmapMut::from_bytes(pixels, image_width, image_height) else {
+    let Some(mut pixmap) = tiny_skia::PixmapMut::from_bytes(
+        pixels,
+        image_width,
+        image_height,
+    ) else {
         return;
     };
     let mut paint = tiny_skia::Paint::default();
     paint.set_color(rgb_color(color));
-    paint.anti_alias = antialias;
-    for i in (0..n).step_by(step) {
-        let x = x_off as f32 + (i as f64 / (n - 1).max(1) as f64 * width as f64) as f32;
-        let sample = samples[i] as f64;
-        let y = y_off as f32 + ((sample - PX_PER_DIV) * y_scale)
-            .clamp(0.0, (height - 1) as f64) as f32;
-        let Some(circle) = tiny_skia::PathBuilder::from_circle(x, y, dot_radius) else { continue; };
-        pixmap.fill_path(&circle, &paint, tiny_skia::FillRule::Winding,
-                         tiny_skia::Transform::identity(), None);
+    paint.anti_alias = true;
+
+    for (x, y) in sample_points {
+        let Some(circle) = tiny_skia::PathBuilder::from_circle(
+            x_off as f32 + x,
+            y_off as f32 + y,
+            dot_radius,
+        ) else {
+            continue;
+        };
+        pixmap.fill_path(
+            &circle,
+            &paint,
+            tiny_skia::FillRule::Winding,
+            tiny_skia::Transform::identity(),
+            None,
+        );
     }
 }
 
