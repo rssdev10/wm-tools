@@ -7,12 +7,22 @@ https://github.com/winnermicro/wm_iot_sdk/tree/master
 
 ## Features
 
+### CLI flasher (`flash`)
+
 - Auto-detects the highest supported baud rate (up to 2 Mbps)
 - XMODEM-1K protocol with CRC-16 verification
 - Progress bar with ETA during flashing
 - Lists available serial ports with USB product info
 - Optional flash erase before writing
 - DTR/RTS-based automatic device reset
+
+### GUI viewer (`dso3d12-gui`)
+
+A graphical application that allows you to visualize and save dumps and screenshots from the ZeeWeii DSO3D12 oscilloscope.
+
+Once connected, the application automatically retrieves debug dumps and snapshot view data from the device, provided these features have been activated via the device buttons. These graphs can be saved as PNG files or exported as CSV data.
+
+To use the snapshot view feature, you must install the modified firmware. For more details, visit [ZeeTweak](https://github.com/taligentx/ZeeTweak). The debug dump export feature is available by default.
 
 ## Requirements
 
@@ -25,7 +35,19 @@ https://github.com/winnermicro/wm_iot_sdk/tree/master
 cargo build --release
 ```
 
-The binary is produced at `target/release/flash`.
+The binaries are produced at:
+
+| Binary | Path |
+|--------|------|
+| CLI flasher | `target/release/flash` |
+| CLI capture | `target/release/capture` |
+| GUI viewer  | `target/release/dso3d12-gui` |
+
+### Run the GUI from source
+
+```bash
+cargo run --bin dso3d12-gui
+```
 
 ## How to use
 

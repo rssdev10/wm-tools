@@ -34,5 +34,8 @@
 *.orig
 *.rej
 
-./firmware
 *.fls
+
+prompts/
+scripts/
+firmware/
