@@ -9,7 +9,9 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use dso_parser::{parse_captures, is_screenshot_packet, Capture};
+use dso_parser::{is_screenshot_packet, parse_captures, Capture};
+#[cfg(target_os = "linux")]
+use serialport::SerialPort;
 use tokio::sync::mpsc;
 
 /// Configuration for serial capture.
@@ -141,14 +143,42 @@ fn listener_loop(
     }
 }
 
-fn open_port(config: &SerialConfig) -> Result<Box<dyn serialport::SerialPort>, serialport::Error> {
+fn serial_builder(config: &SerialConfig) -> serialport::SerialPortBuilder {
     serialport::new(&config.port, config.baud_rate)
         .data_bits(serialport::DataBits::Eight)
         .stop_bits(serialport::StopBits::One)
         .parity(serialport::Parity::None)
         .flow_control(serialport::FlowControl::None)
         .timeout(READ_TIMEOUT)
-        .open()
+}
+
+/// Open the serial port while keeping the modem-control outputs inactive.
+///
+/// Linux's TTY layer asserts DTR/RTS as part of opening a serial device. That
+/// initial edge cannot be suppressed from userspace with the normal TTY API,
+/// but clearing both outputs immediately after the native open substantially
+/// shortens the pulse and avoids leaving the DSO3D12 reset-related lines
+/// asserted during normal operation or reconnects.
+#[cfg(target_os = "linux")]
+fn open_port(config: &SerialConfig) -> Result<Box<dyn serialport::SerialPort>, serialport::Error> {
+    let mut port = serial_builder(config).open_native()?;
+
+    // Do this before returning the port to the read loop. Ignore
+    // Unsupported-operation errors because some USB serial drivers do not
+    // expose one or both modem-control outputs.
+    if let Err(error) = port.write_data_terminal_ready(false) {
+        log::debug!("could not clear DTR on {}: {error}", config.port);
+    }
+    if let Err(error) = port.write_request_to_send(false) {
+        log::debug!("could not clear RTS on {}: {error}", config.port);
+    }
+
+    Ok(Box::new(port))
+}
+
+#[cfg(not(target_os = "linux"))]
+fn open_port(config: &SerialConfig) -> Result<Box<dyn serialport::SerialPort>, serialport::Error> {
+    serial_builder(config).open()
 }
 
 fn read_loop(
@@ -171,8 +201,9 @@ fn read_loop(
             Err(ref e) if e.kind() == std::io::ErrorKind::TimedOut => {
                 // Normal — no data right now.
             }
-            Err(ref e) if e.kind() == std::io::ErrorKind::BrokenPipe
-                || e.kind() == std::io::ErrorKind::PermissionDenied =>
+            Err(ref e)
+                if e.kind() == std::io::ErrorKind::BrokenPipe
+                    || e.kind() == std::io::ErrorKind::PermissionDenied =>
             {
                 log::warn!("serial port disconnected: {e}");
                 return; // Will trigger reconnect.
@@ -185,7 +216,10 @@ fn read_loop(
 
         // Check if we have buffered data and the timeout has elapsed.
         if !accum.is_empty() && last_data.elapsed() >= CAPTURE_TIMEOUT {
-            log::info!("capture timeout; {} bytes buffered, parsing…", accum.len());
+            log::info!(
+                "capture timeout; {} bytes buffered, parsing…",
+                accum.len()
+            );
             // Detect format: screenshot binary (2034–2056 bytes) vs ASCII debug dump
             if is_screenshot_packet(&accum) {
                 log::info!("detected screenshot packet ({} bytes)", accum.len());
