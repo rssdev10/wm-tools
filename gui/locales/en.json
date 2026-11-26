@@ -41,6 +41,8 @@
   "label.voff": "V/off, V:",
   "label.tdiv": "t/div, ms:",
   "label.ac_mode": "AC mode: 8×V, 12×t div",
+  "label.scale_from_metadata": "Scales from capture metadata (read-only)",
+  "label.scale_manual": "Manual scales (capture has no metadata)",
   "label.time_range": "Time range: %{ms} ms (%{n} samp)",
   "label.ch1_stats": "CH1: n=%{n} min=%{min} max=%{max} avg=%{avg}",
   "label.ch2_stats": "CH2: n=%{n} min=%{min} max=%{max} avg=%{avg}",

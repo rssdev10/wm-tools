@@ -3,7 +3,7 @@
 use std::path::PathBuf;
 
 use chrono::{DateTime, Local};
-use dso_parser::{ADC_VALUE_MID, Capture, DEFAULT_BUFFER_DEPTH};
+use dso_parser::{ADC_VALUE_MID, Capture};
 #[cfg(test)]
 use dso_parser::ADC_VALUE_MAX;
 use iced::widget::{
@@ -18,7 +18,22 @@ use iced::{
     Element, Length, Subscription, Task, Theme,
 };
 
-use crate::canvas::{Scope, Thumbnail};
+use crate::canvas::{CursorDrag, Knob, Scope, Thumbnail, ViewReset};
+use crate::plot::View;
+use crate::scale::{CaptureScale, ScaleSource};
+
+/// Identity of a capture for remembering its zoom: the address of its
+/// sample buffer (stable while the capture exists, even when the capture
+/// list is reordered) plus its timestamp, so a new capture that happens to
+/// reuse a freed buffer is still told apart.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct CaptureId(usize, DateTime<Local>);
+
+impl CaptureId {
+    fn of(entry: &CaptureEntry) -> Self {
+        Self(entry.capture.ch1.as_ptr() as usize, entry.timestamp)
+    }
+}
 use crate::export_image::export_png;
 use crate::i18n::t;
 use crate::range_slider;
@@ -67,8 +82,12 @@ pub enum Message {
     TPerCellChanged(String),
     VOffsetChangedCh1(String),
     VOffsetChangedCh2(String),
-    // Graph click — move nearest cursor
-    GraphClicked(f32, f32),
+    // Measurement-cursor drag on the graph (one line, or X+Y near their crossing)
+    MeasCursorDragged(CursorDrag),
+    // Zoom/pan of the graph (mouse wheel, right-drag)
+    ViewChanged(View),
+    // Double-click on the graph: reset the zoom
+    ViewReset(ViewReset),
     // Misc
     OpenInstructions,
     CloseInstructions,
@@ -188,6 +207,10 @@ pub struct App {
     was_listening_before_flash: bool,
     /// Target capture index for context menu export operations.
     context_export_idx: Option<usize>,
+    /// Zoom/pan of both axes and the capture it belongs to. Any other
+    /// capture is shown unzoomed, so selecting, receiving or deleting
+    /// captures needs no explicit reset.
+    view: Option<(CaptureId, View)>,
     /// Last deleted capture, available for undo (index it was at, entry).
     deleted_capture: Option<(usize, CaptureEntry)>,
     /// Timestamp of the last deletion, for 30-second undo expiry.
@@ -250,6 +273,7 @@ impl App {
                 firmware_confirming: false,
                 was_listening_before_flash: false,
                 context_export_idx: None,
+                view: None,
                 deleted_capture: None,
                 deleted_at: None,
                 ctrl_pressed: false,
@@ -381,22 +405,13 @@ impl App {
                 self.status = t!("label.loaded_ok", n = n, path = path_s).to_string();
                 log::info!("{}", self.status);
                 self.current = 0;
+                // Each capture is drawn with its own scale (see scale.rs), so
+                // loading does not touch the manual scale in settings.
                 self.dump = Some(d);
-                // Auto-populate from the first record's scope_state only if it
-                // is the record being shown (single-capture files). For multi-
-                // capture files the user must select a record to apply its
-                // scope_state via the thumbnail strip.
-                if self.dump.as_ref().map(|d| d.captures.len() <= 1).unwrap_or(false) {
-                    if let Some(state) = self.current_entry()
-                        .and_then(|e| e.record.scope_state.clone())
-                    {
-                        self.apply_scope_state(&state);
-                    }
-                }
                 Task::none()
             }
             Message::Loaded(Err(e)) => {
-                self.status = t!("label.load_error", e = format!("{e}")).to_string();
+                self.status = t!("label.load_error", e = e.to_string()).to_string();
                 log::error!("load error: {e}");
                 Task::none()
             }
@@ -423,7 +438,7 @@ impl App {
             Message::PngPathPicked(None) => Task::none(),
             Message::PngPathPicked(Some(path)) => {
                 if let Some(cap) = self.current_capture().cloned() {
-                    match export_png(&path, &cap, &self.settings) {
+                    match export_png(&path, &cap, &self.current_scale(), &self.settings) {
                         Ok(()) => self.status = t!("label.png_saved", path = path.display().to_string()).to_string(),
                         Err(e) => {
                             self.status = t!("label.png_error", e = format!("{e}")).to_string();
@@ -453,16 +468,12 @@ impl App {
                 Task::none()
             }
             Message::SelectCapture(i) => {
-                if let Some(d) = &self.dump {
-                    if i < d.captures.len() {
-                        self.current = i;
-                        // Clone scope_state before calling apply_scope_state
-                        // to avoid borrow conflict with self.dump.
-                        let scope_state = d.captures[i].record.scope_state.clone();
-                        if let Some(ref state) = scope_state {
-                            self.apply_scope_state(state);
-                        }
-                    }
+                if let Some(d) = &self.dump
+                    && i < d.captures.len()
+                {
+                    // The selected capture brings its own scale; the
+                    // manual scale in settings is left unchanged.
+                    self.current = i;
                 }
                 Task::none()
             }
@@ -577,23 +588,14 @@ impl App {
                                     Ok(pkt) => {
                                         let record = dso_parser::screenshot_to_record(&pkt, now, &raw_bytes);
                                         let capture = pkt.to_capture();
-                                        // Auto-fill scale from screenshot metadata
-                                        let s = &pkt.settings;
-                                        let probe1 = 10f64.powi(s.ch1.probe_mode as i32);
-                                        let probe2 = 10f64.powi(s.ch2.probe_mode as i32);
-                                        self.settings.v_per_div_ch1 = s.ch1.volt_scale_uv as f64 / 1_000_000.0 * probe1;
-                                        self.settings.v_per_div_ch2 = s.ch2.volt_scale_uv as f64 / 1_000_000.0 * probe2;
-                                        self.settings.t_per_div_ms = s.timebase_ns_per_div as f64 / 1_000_000.0;
-                                        // pixel_to_volts at screen centre gives  −zero_volt_pixels × vpp × mult,
-                                        // but zero_volt_uv stores the value with opposite sign → negate.
-                                        self.settings.v_offset_ch1 = -(s.ch1.zero_volt_uv as f64) / 1_000_000.0 * probe1;
-                                        self.settings.v_offset_ch2 = -(s.ch2.zero_volt_uv as f64) / 1_000_000.0 * probe2;
-                                        self.v_per_div_ch1_input = format_float(self.settings.v_per_div_ch1);
-                                        self.v_per_div_ch2_input = format_float(self.settings.v_per_div_ch2);
-                                        self.t_per_div_input = format_float(self.settings.t_per_div_ms);
-                                        self.v_offset_ch1_input = format_float(self.settings.v_offset_ch1);
-                                        self.v_offset_ch2_input = format_float(self.settings.v_offset_ch2);
-                                        self.settings.save();
+                                        // The scale travels with the record's
+                                        // metadata; the manual scale in
+                                        // settings is left unchanged.
+                                        let scale = CaptureScale::for_capture(
+                                            record.scope_state.as_ref(),
+                                            &self.settings,
+                                        );
+                                        let timebase = pkt.settings.timebase_label();
 
                                         let entry = CaptureEntry { capture, timestamp: now, record };
                                         if let Some(ref mut dump) = self.dump {
@@ -612,9 +614,9 @@ impl App {
                                         self.deleted_at = None;
                                         let total = self.dump.as_ref().map(|d| d.captures.len()).unwrap_or(0);
                                         self.status = t!("label.screenshot_received",
-                                            ch1 = dso_parser::format_uv((self.settings.v_per_div_ch1 * 1_000_000.0) as i64, 0),
-                                            ch2 = dso_parser::format_uv((self.settings.v_per_div_ch2 * 1_000_000.0) as i64, 0),
-                                            timebase = s.timebase_label(),
+                                            ch1 = dso_parser::format_uv((scale.v_per_div_ch1 * 1_000_000.0) as i64, 0),
+                                            ch2 = dso_parser::format_uv((scale.v_per_div_ch2 * 1_000_000.0) as i64, 0),
+                                            timebase = timebase,
                                             total = total,
                                         ).to_string();
                                     }
@@ -698,77 +700,87 @@ impl App {
             }
             Message::VPerCellChangedCh1(s) => {
                 self.v_per_div_ch1_input = s.clone();
-                if let Ok(v) = s.parse::<f64>() {
-                    if v > 0.0 && v.is_finite() {
-                        self.settings.v_per_div_ch1 = v;
-                        self.settings.save();
-                    }
+                if let Ok(v) = s.parse::<f64>()
+                    && v > 0.0
+                    && v.is_finite()
+                {
+                    self.settings.v_per_div_ch1 = v;
+                    self.settings.save();
                 }
                 Task::none()
             }
             Message::VPerCellChangedCh2(s) => {
                 self.v_per_div_ch2_input = s.clone();
-                if let Ok(v) = s.parse::<f64>() {
-                    if v > 0.0 && v.is_finite() {
-                        self.settings.v_per_div_ch2 = v;
-                        self.settings.save();
-                    }
+                if let Ok(v) = s.parse::<f64>()
+                    && v > 0.0
+                    && v.is_finite()
+                {
+                    self.settings.v_per_div_ch2 = v;
+                    self.settings.save();
                 }
                 Task::none()
             }
             Message::TPerCellChanged(s) => {
                 self.t_per_div_input = s.clone();
-                if let Ok(v) = s.parse::<f64>() {
-                    if v > 0.0 && v.is_finite() {
-                        self.settings.t_per_div_ms = v;
-                        self.settings.save();
-                    }
+                if let Ok(v) = s.parse::<f64>()
+                    && v > 0.0
+                    && v.is_finite()
+                {
+                    self.settings.t_per_div_ms = v;
+                    self.settings.save();
                 }
                 Task::none()
             }
             Message::VOffsetChangedCh1(s) => {
                 self.v_offset_ch1_input = s.clone();
-                if let Ok(v) = s.parse::<f64>() {
-                    if v.is_finite() {
-                        self.settings.v_offset_ch1 = v;
-                        self.settings.save();
-                    }
+                if let Ok(v) = s.parse::<f64>()
+                    && v.is_finite()
+                {
+                    self.settings.v_offset_ch1 = v;
+                    self.settings.save();
                 }
                 Task::none()
             }
             Message::VOffsetChangedCh2(s) => {
                 self.v_offset_ch2_input = s.clone();
-                if let Ok(v) = s.parse::<f64>() {
-                    if v.is_finite() {
-                        self.settings.v_offset_ch2 = v;
-                        self.settings.save();
-                    }
+                if let Ok(v) = s.parse::<f64>()
+                    && v.is_finite()
+                {
+                    self.settings.v_offset_ch2 = v;
+                    self.settings.save();
                 }
                 Task::none()
             }
-            Message::GraphClicked(frac_x, frac_y) => {
-                // Move nearest cursor to the click position.
-                // If X cursors enabled, move nearest X cursor knob.
-                if self.settings.measurement_cursor_x_enabled {
-                    let (lo, hi) = self.settings.cursor_x_range;
-                    let dist_lo = (frac_x - lo).abs();
-                    let dist_hi = (frac_x - hi).abs();
-                    if dist_lo <= dist_hi {
-                        self.settings.cursor_x_range.0 = frac_x.clamp(0.0, hi);
-                    } else {
-                        self.settings.cursor_x_range.1 = frac_x.clamp(lo, 1.0);
-                    }
+            Message::ViewChanged(view) => {
+                self.view = self
+                    .current_entry()
+                    .map(|e| (CaptureId::of(e), view));
+                Task::none()
+            }
+            Message::ViewReset(reset) => {
+                self.view = None;
+                // Undo the cursor move made by the first click of the
+                // double-click (ranges are only present for enabled cursors).
+                if let Some(range) = reset.cursor_x {
+                    self.settings.cursor_x_range = range;
                 }
-                // If Y cursors enabled, move nearest Y cursor knob.
-                if self.settings.measurement_cursor_y_enabled {
-                    let (lo, hi) = self.settings.cursor_y_range;
-                    let dist_lo = (frac_y - lo).abs();
-                    let dist_hi = (frac_y - hi).abs();
-                    if dist_lo <= dist_hi {
-                        self.settings.cursor_y_range.0 = frac_y.clamp(0.0, hi);
-                    } else {
-                        self.settings.cursor_y_range.1 = frac_y.clamp(lo, 1.0);
-                    }
+                if let Some(range) = reset.cursor_y {
+                    self.settings.cursor_y_range = range;
+                }
+                Task::none()
+            }
+            Message::MeasCursorDragged(drag) => {
+                // Move only the lines the canvas picked for this drag: one
+                // line, or an X and a Y line near their crossing.
+                if self.settings.measurement_cursor_x_enabled
+                    && let Some(knob) = drag.target.x
+                {
+                    move_knob(&mut self.settings.cursor_x_range, knob, drag.frac_x);
+                }
+                if self.settings.measurement_cursor_y_enabled
+                    && let Some(knob) = drag.target.y
+                {
+                    move_knob(&mut self.settings.cursor_y_range, knob, drag.frac_y);
                 }
                 Task::none()
             }
@@ -789,18 +801,18 @@ impl App {
             }
             Message::CloseSettings => {
                 // Apply settings
-                if let Ok(b) = self.settings_baud_input.parse::<u32>() {
-                    if b > 0 {
-                        self.settings.baud_rate = b;
-                    }
+                if let Ok(b) = self.settings_baud_input.parse::<u32>()
+                    && b > 0
+                {
+                    self.settings.baud_rate = b;
                 }
                 let p = self.settings_port_input.trim().to_string();
                 self.settings.serial_port = if p.is_empty() { None } else { Some(p) };
                 // PNG export width: minimum 300 px, 0 = default small.
-                if let Ok(w) = self.png_width_input.trim().parse::<u32>() {
-                    if w == 0 || w >= 300 {
-                        self.settings.png_export_width = w;
-                    }
+                if let Ok(w) = self.png_width_input.trim().parse::<u32>()
+                    && (w == 0 || w >= 300)
+                {
+                    self.settings.png_export_width = w;
                 }
                 self.settings.save();
                 self.show_settings = false;
@@ -849,12 +861,12 @@ impl App {
             Message::PortScanTick => {
                 self.available_ports = serial::list_ports();
                 // Auto-listen: if enabled and not currently listening and a port is available
-                if self.settings.auto_listen && !self.listening {
-                    if let Some(port) = &self.settings.serial_port {
-                        if self.available_ports.contains(port) {
-                            return self.update(Message::StartListening);
-                        }
-                    }
+                if self.settings.auto_listen
+                    && !self.listening
+                    && let Some(port) = &self.settings.serial_port
+                    && self.available_ports.contains(port)
+                {
+                    return self.update(Message::StartListening);
                 }
                 Task::none()
             }
@@ -868,16 +880,16 @@ impl App {
                 Task::none()
             }
             Message::ContextMenuDeleteAt(idx) => {
-                if let Some(ref mut dump) = self.dump {
-                    if idx < dump.captures.len() {
-                        let entry = dump.captures.remove(idx);
-                        self.deleted_capture = Some((idx, entry));
-                        self.deleted_at = Some(std::time::Instant::now());
-                        if self.current >= dump.captures.len() && self.current > 0 {
-                            self.current -= 1;
-                        }
-                        self.status = t!("label.deleted", n = idx + 1).to_string();
+                if let Some(ref mut dump) = self.dump
+                    && idx < dump.captures.len()
+                {
+                    let entry = dump.captures.remove(idx);
+                    self.deleted_capture = Some((idx, entry));
+                    self.deleted_at = Some(std::time::Instant::now());
+                    if self.current >= dump.captures.len() && self.current > 0 {
+                        self.current -= 1;
                     }
+                    self.status = t!("label.deleted", n = idx + 1).to_string();
                 }
                 Task::none()
             }
@@ -896,14 +908,14 @@ impl App {
                 Task::none()
             }
             Message::UndoExpiredTick => {
-                if let Some(at) = self.deleted_at {
-                    if at.elapsed().as_secs() >= 30 {
-                        self.deleted_capture = None;
-                        self.deleted_at = None;
-                        // Clear the status hint only if it still mentions undo
-                        if self.status.contains("Undo") {
-                            self.status = t!("label.undo_expired").to_string();
-                        }
+                if let Some(at) = self.deleted_at
+                    && at.elapsed().as_secs() >= 30
+                {
+                    self.deleted_capture = None;
+                    self.deleted_at = None;
+                    // Clear the status hint only if it still mentions undo
+                    if self.status.contains("Undo") {
+                        self.status = t!("label.undo_expired").to_string();
                     }
                 }
                 Task::none()
@@ -922,7 +934,7 @@ impl App {
             Message::ContextMenuExportPngPicked(Some(path)) => {
                 let idx = self.context_export_idx.take().unwrap_or(self.current);
                 if let Some(cap) = self.dump.as_ref().and_then(|d| d.captures.get(idx)).map(|e| &e.capture).cloned() {
-                    match export_png(&path, &cap, &self.settings) {
+                    match export_png(&path, &cap, &self.scale_of(idx), &self.settings) {
                         Ok(()) => self.status = t!("label.png_saved", path = path.display().to_string()).to_string(),
                         Err(e) => self.status = t!("label.png_error", e = format!("{e}")).to_string(),
                     }
@@ -970,12 +982,12 @@ impl App {
                 self.show_firmware = false;
                 self.firmware_confirming = false;
                 // Auto-reconnect if we were listening before
-                if self.was_listening_before_flash && !self.listening {
-                    if let Some(port) = &self.settings.serial_port {
-                        if self.available_ports.contains(port) {
-                            return self.update(Message::StartListening);
-                        }
-                    }
+                if self.was_listening_before_flash
+                    && !self.listening
+                    && let Some(port) = &self.settings.serial_port
+                    && self.available_ports.contains(port)
+                {
+                    return self.update(Message::StartListening);
                 }
                 Task::none()
             }
@@ -1049,7 +1061,7 @@ impl App {
                                         self.firmware_status = t!("label.firmware_complete").to_string();
                                     }
                                     Err(e) => {
-                                        self.firmware_status = t!("label.firmware_error", e = format!("{e}")).to_string();
+                                        self.firmware_status = t!("label.firmware_error", e = e.to_string()).to_string();
                                     }
                                 }
                                 finished = true;
@@ -1449,30 +1461,29 @@ impl App {
         .into()
     }
 
-    /// Apply oscilloscope state metadata (V/div, V/offset, t/div) to the
-    /// current settings and input fields. Used when loading captures that
-    /// contain embedded scope_state (screenshot packets or .zwcap files).
-    ///
-    /// Note: `v_offset_v` is stored with the same sign as the device's
-    /// `zero_volt_uv` field.  The device's `pixel_to_volts` formula at
-    /// screen centre gives `−zero_volt_pixels × vpp × mult`, i.e. the
-    /// *opposite* sign, so we negate here.
-    fn apply_scope_state(&mut self, state: &dso_parser::ScopeState) {
-        if let Some(ref ch1) = state.ch1 {
-            self.settings.v_per_div_ch1 = ch1.vdiv_v;
-            self.settings.v_offset_ch1 = -ch1.v_offset_v;
+    /// Scale of the capture at `idx`: its metadata scale, or the manual
+    /// scale for a capture without metadata (or when there is no capture).
+    pub(crate) fn scale_of(&self, idx: usize) -> CaptureScale {
+        let state = self
+            .dump
+            .as_ref()
+            .and_then(|d| d.captures.get(idx))
+            .and_then(|e| e.record.scope_state.as_ref());
+        CaptureScale::for_capture(state, &self.settings)
+    }
+
+    /// Scale of the capture being shown.
+    /// Zoom/pan of the capture being shown; unzoomed unless the user
+    /// zoomed this very capture.
+    pub(crate) fn current_view(&self) -> View {
+        match (&self.view, self.current_entry()) {
+            (Some((id, view)), Some(e)) if *id == CaptureId::of(e) => *view,
+            _ => View::UNIT,
         }
-        if let Some(ref ch2) = state.ch2 {
-            self.settings.v_per_div_ch2 = ch2.vdiv_v;
-            self.settings.v_offset_ch2 = -ch2.v_offset_v;
-        }
-        self.settings.t_per_div_ms = state.timebase_ns_per_div as f64 / 1_000_000.0;
-        self.v_per_div_ch1_input = format_float(self.settings.v_per_div_ch1);
-        self.v_per_div_ch2_input = format_float(self.settings.v_per_div_ch2);
-        self.t_per_div_input = format_float(self.settings.t_per_div_ms);
-        self.v_offset_ch1_input = format_float(self.settings.v_offset_ch1);
-        self.v_offset_ch2_input = format_float(self.settings.v_offset_ch2);
-        self.settings.save();
+    }
+
+    pub(crate) fn current_scale(&self) -> CaptureScale {
+        self.scale_of(self.current)
     }
 
     /// Apply fine-drag scaling when Ctrl is held: only 1/10 of the raw
@@ -1509,15 +1520,14 @@ impl App {
             cap.is_some(),
             cap.map(|c| c.ch1.len()).unwrap_or(0)
         );
-        let n_samples = cap.map(|c| c.ch1.len()).unwrap_or(DEFAULT_BUFFER_DEPTH);
         let has_ch2_data = cap.and_then(|c| c.ch2.as_ref()).is_some();
+        let scale = self.current_scale();
         let scope = Scope {
             capture: cap,
             show_ch1: self.settings.show_ch1,
             show_ch2: self.settings.show_ch2,
             view_mode: self.settings.view_mode,
             show_scales: self.settings.show_scales,
-            n_samples,
             has_ch1: self.settings.show_ch1,
             has_ch2: self.settings.show_ch2 && has_ch2_data,
             meas_cursor_x: if self.settings.measurement_cursor_x_enabled {
@@ -1546,16 +1556,19 @@ impl App {
             } else {
                 None
             },
-            v_per_div_ch1: self.settings.v_per_div_ch1,
-            v_per_div_ch2: self.settings.v_per_div_ch2,
-            t_per_div_ms: self.settings.t_per_div_ms,
-            v_offset_ch1: self.settings.v_offset_ch1,
-            v_offset_ch2: self.settings.v_offset_ch2,
+            v_per_div_ch1: scale.v_per_div_ch1,
+            v_per_div_ch2: scale.v_per_div_ch2,
+            t_per_div_ms: scale.t_per_div_ms,
+            v_offset_ch1: scale.v_offset_ch1,
+            v_offset_ch2: scale.v_offset_ch2,
             active_channel: self.current_entry()
                 .and_then(|e| e.record.scope_state.as_ref())
                 .map(|s| s.active_channel)
                 .unwrap_or(0),
-            on_click: Some(Message::GraphClicked),
+            on_cursor_drag: Some(Message::MeasCursorDragged),
+            view: self.current_view(),
+            on_view_change: Some(Message::ViewChanged),
+            on_view_reset: Some(Message::ViewReset),
         };
         canvas(scope)
             .width(Length::Fill)
@@ -1571,13 +1584,13 @@ impl App {
         let (xlo, xhi) = self.settings.cursor_x_range;
         let (ylo, yhi) = self.settings.cursor_y_range;
 
-        // Scale parameters (per-channel)
-        let v_per_div_ch1 = self.settings.v_per_div_ch1;
-        let v_per_div_ch2 = self.settings.v_per_div_ch2;
-        let t_per_div_ms = self.settings.t_per_div_ms;
-        let v_offset_ch1 = self.settings.v_offset_ch1;
-        let v_offset_ch2 = self.settings.v_offset_ch2;
-        let total_time_ms = 12.0 * t_per_div_ms;
+        // Scale of the capture being shown (its metadata, or the manual scale).
+        let scale = self.current_scale();
+        let v_per_div_ch1 = scale.v_per_div_ch1;
+        let v_per_div_ch2 = scale.v_per_div_ch2;
+        let v_offset_ch1 = scale.v_offset_ch1;
+        let v_offset_ch2 = scale.v_offset_ch2;
+        let total_time_ms = 12.0 * scale.t_per_div_ms;
 
         let mut items: Vec<Element<'_, Message>> = vec![
             text(t!("label.measurement")).size(13).into(),
@@ -1648,6 +1661,19 @@ impl App {
         items.push(rule::horizontal(1).into());
 
         // ── Scale inputs (two-column layout: CH1 | CH2) ──
+        // A capture without metadata is drawn with the manual scale, which
+        // the user edits here. A capture with metadata shows its own scale
+        // read-only (a text_input without on_input is disabled).
+        let manual_scale = scale.source == ScaleSource::Manual;
+        let scale_field = |placeholder: &str,
+                           input: &str,
+                           value: f64,
+                           on_input: fn(String) -> Message,
+                           width: Length| {
+            let shown = if manual_scale { input.to_string() } else { format_float(value) };
+            let field = text_input(placeholder, &shown).size(11).width(width);
+            if manual_scale { field.on_input(on_input) } else { field }
+        };
         let col_w = Length::Fixed(85.0);
         let input_w = Length::Fixed(42.0);
         items.push(
@@ -1663,14 +1689,10 @@ impl App {
         items.push(
             row![
                 text(t!("label.vdiv")).size(11).width(col_w),
-                text_input("1.0", &self.v_per_div_ch1_input)
-                    .on_input(Message::VPerCellChangedCh1)
-                    .size(11)
-                    .width(input_w),
-                text_input("1.0", &self.v_per_div_ch2_input)
-                    .on_input(Message::VPerCellChangedCh2)
-                    .size(11)
-                    .width(input_w),
+                scale_field("1.0", &self.v_per_div_ch1_input, v_per_div_ch1,
+                            Message::VPerCellChangedCh1, input_w),
+                scale_field("1.0", &self.v_per_div_ch2_input, v_per_div_ch2,
+                            Message::VPerCellChangedCh2, input_w),
             ]
             .spacing(2)
             .align_y(iced::Alignment::Center)
@@ -1704,14 +1726,10 @@ impl App {
         items.push(
             row![
                 text(t!("label.voff")).size(11).width(col_w),
-                text_input("0.0", &self.v_offset_ch1_input)
-                    .on_input(Message::VOffsetChangedCh1)
-                    .size(11)
-                    .width(input_w),
-                text_input("0.0", &self.v_offset_ch2_input)
-                    .on_input(Message::VOffsetChangedCh2)
-                    .size(11)
-                    .width(input_w),
+                scale_field("0.0", &self.v_offset_ch1_input, v_offset_ch1,
+                            Message::VOffsetChangedCh1, input_w),
+                scale_field("0.0", &self.v_offset_ch2_input, v_offset_ch2,
+                            Message::VOffsetChangedCh2, input_w),
             ]
             .spacing(2)
             .align_y(iced::Alignment::Center)
@@ -1721,13 +1739,21 @@ impl App {
         items.push(
             row![
                 text(t!("label.tdiv")).size(11).width(col_w),
-                text_input("1.0", &self.t_per_div_input)
-                    .on_input(Message::TPerCellChanged)
-                    .size(11)
-                    .width(Length::Fixed(90.0))
+                scale_field("1.0", &self.t_per_div_input, scale.t_per_div_ms,
+                            Message::TPerCellChanged, Length::Fixed(90.0)),
             ]
             .spacing(2)
             .align_y(iced::Alignment::Center)
+            .into(),
+        );
+        items.push(
+            text(if manual_scale {
+                t!("label.scale_manual")
+            } else {
+                t!("label.scale_from_metadata")
+            })
+            .size(9)
+            .color(Color::from_rgb(0.6, 0.6, 0.6))
             .into(),
         );
         items.push(text(t!("label.ac_mode")).size(9).into());
@@ -2169,6 +2195,14 @@ use crate::canvas::{GRID_HEIGHT_PX, PX_PER_DIV};
 /// to voltage.  Formula from pixel_to_volts: V = V_offset + (ADC_MID - v) × V/div / PX_PER_DIV,
 /// where v = frac × GRID_HEIGHT_PX + PX_PER_DIV matches draw_trace's offset
 /// (v=25 maps to y=0, the top of the visible grid).
+/// Move one knob of a measurement-cursor range, keeping `low <= high`.
+fn move_knob(range: &mut (f32, f32), knob: Knob, frac: f32) {
+    match knob {
+        Knob::Low => range.0 = frac.clamp(0.0, range.1),
+        Knob::High => range.1 = frac.clamp(range.0, 1.0),
+    }
+}
+
 fn frac_to_voltage(frac: f64, v_per_div: f64, v_offset: f64) -> f64 {
     let v = frac * GRID_HEIGHT_PX + PX_PER_DIV;
     v_offset + (ADC_VALUE_MID as f64 - v) * v_per_div / PX_PER_DIV
@@ -2519,6 +2553,133 @@ mod tests {
         let (mut app, _) = App::new();
         let _ = app.update(Message::MeasCursorXChanged(0.1, 0.9));
         assert_eq!(app.settings.cursor_x_range, (0.1, 0.9));
+    }
+
+    #[test]
+    fn cursor_drag_moves_only_the_picked_lines() {
+        use crate::canvas::DragTarget;
+        let (mut app, _) = App::new();
+        app.settings.measurement_cursor_x_enabled = true;
+        app.settings.measurement_cursor_y_enabled = true;
+        app.settings.cursor_x_range = (0.2, 0.6);
+        app.settings.cursor_y_range = (0.3, 0.7);
+
+        // X line only: Y range must not change.
+        let _ = app.update(Message::MeasCursorDragged(CursorDrag {
+            target: DragTarget { x: Some(Knob::High), y: None },
+            frac_x: 0.8,
+            frac_y: 0.1,
+        }));
+        assert_eq!(app.settings.cursor_x_range, (0.2, 0.8));
+        assert_eq!(app.settings.cursor_y_range, (0.3, 0.7));
+
+        // Both lines near their crossing.
+        let _ = app.update(Message::MeasCursorDragged(CursorDrag {
+            target: DragTarget { x: Some(Knob::Low), y: Some(Knob::Low) },
+            frac_x: 0.1,
+            frac_y: 0.4,
+        }));
+        assert_eq!(app.settings.cursor_x_range, (0.1, 0.8));
+        assert_eq!(app.settings.cursor_y_range, (0.4, 0.7));
+    }
+
+    #[test]
+    fn cursor_drag_keeps_knob_order_and_respects_disabled_axis() {
+        use crate::canvas::DragTarget;
+        let (mut app, _) = App::new();
+        app.settings.measurement_cursor_x_enabled = true;
+        app.settings.measurement_cursor_y_enabled = false;
+        app.settings.cursor_x_range = (0.2, 0.6);
+        app.settings.cursor_y_range = (0.3, 0.7);
+
+        // Dragging the low knob past the high one stops at the high one.
+        let _ = app.update(Message::MeasCursorDragged(CursorDrag {
+            target: DragTarget { x: Some(Knob::Low), y: Some(Knob::Low) },
+            frac_x: 0.9,
+            frac_y: 0.0,
+        }));
+        assert_eq!(app.settings.cursor_x_range, (0.6, 0.6));
+        assert_eq!(app.settings.cursor_y_range, (0.3, 0.7));
+    }
+
+    #[test]
+    fn each_capture_keeps_its_own_scale() {
+        let (mut app, _) = App::new();
+        app.settings.v_per_div_ch1 = 0.1;
+        app.settings.t_per_div_ms = 5.0;
+        let manual_before = (app.settings.v_per_div_ch1, app.settings.t_per_div_ms);
+
+        let dump = test_entry(Capture { ch1: vec![1, 2, 3], ch2: None });
+        let mut screenshot = test_entry(Capture { ch1: vec![4, 5, 6], ch2: None });
+        screenshot.record.scope_state = Some(crate::scale::tests::scope_state(None));
+        app.dump = Some(LoadedDump {
+            path: PathBuf::from("test.zwcap"),
+            captures: vec![screenshot, dump],
+        });
+
+        // Capture with metadata: its own 2 V/div and 50 µs/div.
+        let _ = app.update(Message::SelectCapture(0));
+        let s = app.current_scale();
+        assert_eq!(s.source, ScaleSource::Metadata);
+        assert_eq!((s.v_per_div_ch1, s.t_per_div_ms), (2.0, 0.05));
+
+        // Debug dump without metadata: the manual scale, not the scale of
+        // the capture shown before it.
+        let _ = app.update(Message::SelectCapture(1));
+        let s = app.current_scale();
+        assert_eq!(s.source, ScaleSource::Manual);
+        assert_eq!((s.v_per_div_ch1, s.t_per_div_ms), manual_before);
+
+        // Selecting captures never rewrites the manual scale.
+        assert_eq!((app.settings.v_per_div_ch1, app.settings.t_per_div_ms), manual_before);
+        // Exports of a capture that is not shown use that capture's scale.
+        assert_eq!(app.scale_of(0).source, ScaleSource::Metadata);
+    }
+
+    #[test]
+    fn zoom_belongs_to_the_capture_it_was_made_on() {
+        let (mut app, _) = App::new();
+        app.dump = Some(LoadedDump {
+            path: PathBuf::from("test.bin"),
+            captures: vec![
+                test_entry(Capture { ch1: vec![1; 100], ch2: None }),
+                test_entry(Capture { ch1: vec![2; 100], ch2: None }),
+            ],
+        });
+        let zoomed = View {
+            x: crate::plot::AxisView { lo: 0.2, hi: 0.4 },
+            y: crate::plot::AxisView { lo: -0.1, hi: 1.1 },
+        };
+        let _ = app.update(Message::ViewChanged(zoomed));
+        assert_eq!(app.current_view(), zoomed);
+
+        // Another capture is shown in full; coming back restores the zoom.
+        let _ = app.update(Message::SelectCapture(1));
+        assert_eq!(app.current_view(), View::UNIT);
+        let _ = app.update(Message::SelectCapture(0));
+        assert_eq!(app.current_view(), zoomed);
+    }
+
+    #[test]
+    fn double_click_reset_unzooms_and_restores_cursors() {
+        let (mut app, _) = App::new();
+        app.dump = Some(LoadedDump {
+            path: PathBuf::from("test.bin"),
+            captures: vec![test_entry(Capture { ch1: vec![1; 100], ch2: None })],
+        });
+        let mut zoomed = View::UNIT;
+        zoomed.x = crate::plot::AxisView { lo: 0.2, hi: 0.4 };
+        let _ = app.update(Message::ViewChanged(zoomed));
+        app.settings.cursor_x_range = (0.3, 0.5); // moved by the first click
+        app.settings.cursor_y_range = (0.1, 0.9);
+
+        let _ = app.update(Message::ViewReset(ViewReset {
+            cursor_x: Some((0.3, 0.7)),
+            cursor_y: None,
+        }));
+        assert_eq!(app.current_view(), View::UNIT);
+        assert_eq!(app.settings.cursor_x_range, (0.3, 0.7));
+        assert_eq!(app.settings.cursor_y_range, (0.1, 0.9));
     }
 
     #[test]

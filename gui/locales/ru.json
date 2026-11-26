@@ -41,6 +41,8 @@
   "label.voff": "Смещ, В:",
   "label.tdiv": "время/дел, мс:",
   "label.ac_mode": "Режим АС: 8×В, 12×t дел",
+  "label.scale_from_metadata": "Масштабы из метаданных захвата (только чтение)",
+  "label.scale_manual": "Ручные масштабы (у захвата нет метаданных)",
   "label.time_range": "Время: %{ms} мс (%{n} отсчётов)",
   "label.ch1_stats": "CH1: n=%{n} мин=%{min} макс=%{max} ср=%{avg}",
   "label.ch2_stats": "CH2: n=%{n} мин=%{min} макс=%{max} ср=%{avg}",

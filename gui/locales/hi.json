@@ -41,6 +41,8 @@
   "label.voff": "V ऑफ़सेट, V:",
   "label.tdiv": "t/डिव, मि.से.:",
   "label.ac_mode": "AC मोड: 8×V, 12×t डिव",
+  "label.scale_from_metadata": "स्केल कैप्चर मेटाडेटा से (केवल पढ़ने के लिए)",
+  "label.scale_manual": "मैनुअल स्केल (कैप्चर में मेटाडेटा नहीं है)",
   "label.time_range": "समय: %{ms} मि.से. (%{n} नमूने)",
   "label.ch1_stats": "CH1: n=%{n} न्यून=%{min} अधि=%{max} औसत=%{avg}",
   "label.ch2_stats": "CH2: n=%{n} न्यून=%{min} अधि=%{max} औसत=%{avg}",
