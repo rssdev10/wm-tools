@@ -468,12 +468,12 @@ impl App {
                 Task::none()
             }
             Message::SelectCapture(i) => {
-                if let Some(d) = &self.dump {
-                    if i < d.captures.len() {
-                        // The selected capture brings its own scale; the
-                        // manual scale in settings is left unchanged.
-                        self.current = i;
-                    }
+                if let Some(d) = &self.dump
+                    && i < d.captures.len()
+                {
+                    // The selected capture brings its own scale; the
+                    // manual scale in settings is left unchanged.
+                    self.current = i;
                 }
                 Task::none()
             }
@@ -700,51 +700,54 @@ impl App {
             }
             Message::VPerCellChangedCh1(s) => {
                 self.v_per_div_ch1_input = s.clone();
-                if let Ok(v) = s.parse::<f64>() {
-                    if v > 0.0 && v.is_finite() {
-                        self.settings.v_per_div_ch1 = v;
-                        self.settings.save();
-                    }
+                if let Ok(v) = s.parse::<f64>()
+                    && v > 0.0
+                    && v.is_finite()
+                {
+                    self.settings.v_per_div_ch1 = v;
+                    self.settings.save();
                 }
                 Task::none()
             }
             Message::VPerCellChangedCh2(s) => {
                 self.v_per_div_ch2_input = s.clone();
-                if let Ok(v) = s.parse::<f64>() {
-                    if v > 0.0 && v.is_finite() {
-                        self.settings.v_per_div_ch2 = v;
-                        self.settings.save();
-                    }
+                if let Ok(v) = s.parse::<f64>()
+                    && v > 0.0
+                    && v.is_finite()
+                {
+                    self.settings.v_per_div_ch2 = v;
+                    self.settings.save();
                 }
                 Task::none()
             }
             Message::TPerCellChanged(s) => {
                 self.t_per_div_input = s.clone();
-                if let Ok(v) = s.parse::<f64>() {
-                    if v > 0.0 && v.is_finite() {
-                        self.settings.t_per_div_ms = v;
-                        self.settings.save();
-                    }
+                if let Ok(v) = s.parse::<f64>()
+                    && v > 0.0
+                    && v.is_finite()
+                {
+                    self.settings.t_per_div_ms = v;
+                    self.settings.save();
                 }
                 Task::none()
             }
             Message::VOffsetChangedCh1(s) => {
                 self.v_offset_ch1_input = s.clone();
-                if let Ok(v) = s.parse::<f64>() {
-                    if v.is_finite() {
-                        self.settings.v_offset_ch1 = v;
-                        self.settings.save();
-                    }
+                if let Ok(v) = s.parse::<f64>()
+                    && v.is_finite()
+                {
+                    self.settings.v_offset_ch1 = v;
+                    self.settings.save();
                 }
                 Task::none()
             }
             Message::VOffsetChangedCh2(s) => {
                 self.v_offset_ch2_input = s.clone();
-                if let Ok(v) = s.parse::<f64>() {
-                    if v.is_finite() {
-                        self.settings.v_offset_ch2 = v;
-                        self.settings.save();
-                    }
+                if let Ok(v) = s.parse::<f64>()
+                    && v.is_finite()
+                {
+                    self.settings.v_offset_ch2 = v;
+                    self.settings.save();
                 }
                 Task::none()
             }
@@ -769,15 +772,15 @@ impl App {
             Message::MeasCursorDragged(drag) => {
                 // Move only the lines the canvas picked for this drag: one
                 // line, or an X and a Y line near their crossing.
-                if self.settings.measurement_cursor_x_enabled {
-                    if let Some(knob) = drag.target.x {
-                        move_knob(&mut self.settings.cursor_x_range, knob, drag.frac_x);
-                    }
+                if self.settings.measurement_cursor_x_enabled
+                    && let Some(knob) = drag.target.x
+                {
+                    move_knob(&mut self.settings.cursor_x_range, knob, drag.frac_x);
                 }
-                if self.settings.measurement_cursor_y_enabled {
-                    if let Some(knob) = drag.target.y {
-                        move_knob(&mut self.settings.cursor_y_range, knob, drag.frac_y);
-                    }
+                if self.settings.measurement_cursor_y_enabled
+                    && let Some(knob) = drag.target.y
+                {
+                    move_knob(&mut self.settings.cursor_y_range, knob, drag.frac_y);
                 }
                 Task::none()
             }
@@ -798,18 +801,18 @@ impl App {
             }
             Message::CloseSettings => {
                 // Apply settings
-                if let Ok(b) = self.settings_baud_input.parse::<u32>() {
-                    if b > 0 {
-                        self.settings.baud_rate = b;
-                    }
+                if let Ok(b) = self.settings_baud_input.parse::<u32>()
+                    && b > 0
+                {
+                    self.settings.baud_rate = b;
                 }
                 let p = self.settings_port_input.trim().to_string();
                 self.settings.serial_port = if p.is_empty() { None } else { Some(p) };
                 // PNG export width: minimum 300 px, 0 = default small.
-                if let Ok(w) = self.png_width_input.trim().parse::<u32>() {
-                    if w == 0 || w >= 300 {
-                        self.settings.png_export_width = w;
-                    }
+                if let Ok(w) = self.png_width_input.trim().parse::<u32>()
+                    && (w == 0 || w >= 300)
+                {
+                    self.settings.png_export_width = w;
                 }
                 self.settings.save();
                 self.show_settings = false;
@@ -858,12 +861,12 @@ impl App {
             Message::PortScanTick => {
                 self.available_ports = serial::list_ports();
                 // Auto-listen: if enabled and not currently listening and a port is available
-                if self.settings.auto_listen && !self.listening {
-                    if let Some(port) = &self.settings.serial_port {
-                        if self.available_ports.contains(port) {
-                            return self.update(Message::StartListening);
-                        }
-                    }
+                if self.settings.auto_listen
+                    && !self.listening
+                    && let Some(port) = &self.settings.serial_port
+                    && self.available_ports.contains(port)
+                {
+                    return self.update(Message::StartListening);
                 }
                 Task::none()
             }
@@ -877,16 +880,16 @@ impl App {
                 Task::none()
             }
             Message::ContextMenuDeleteAt(idx) => {
-                if let Some(ref mut dump) = self.dump {
-                    if idx < dump.captures.len() {
-                        let entry = dump.captures.remove(idx);
-                        self.deleted_capture = Some((idx, entry));
-                        self.deleted_at = Some(std::time::Instant::now());
-                        if self.current >= dump.captures.len() && self.current > 0 {
-                            self.current -= 1;
-                        }
-                        self.status = t!("label.deleted", n = idx + 1).to_string();
+                if let Some(ref mut dump) = self.dump
+                    && idx < dump.captures.len()
+                {
+                    let entry = dump.captures.remove(idx);
+                    self.deleted_capture = Some((idx, entry));
+                    self.deleted_at = Some(std::time::Instant::now());
+                    if self.current >= dump.captures.len() && self.current > 0 {
+                        self.current -= 1;
                     }
+                    self.status = t!("label.deleted", n = idx + 1).to_string();
                 }
                 Task::none()
             }
@@ -905,14 +908,14 @@ impl App {
                 Task::none()
             }
             Message::UndoExpiredTick => {
-                if let Some(at) = self.deleted_at {
-                    if at.elapsed().as_secs() >= 30 {
-                        self.deleted_capture = None;
-                        self.deleted_at = None;
-                        // Clear the status hint only if it still mentions undo
-                        if self.status.contains("Undo") {
-                            self.status = t!("label.undo_expired").to_string();
-                        }
+                if let Some(at) = self.deleted_at
+                    && at.elapsed().as_secs() >= 30
+                {
+                    self.deleted_capture = None;
+                    self.deleted_at = None;
+                    // Clear the status hint only if it still mentions undo
+                    if self.status.contains("Undo") {
+                        self.status = t!("label.undo_expired").to_string();
                     }
                 }
                 Task::none()
@@ -979,12 +982,12 @@ impl App {
                 self.show_firmware = false;
                 self.firmware_confirming = false;
                 // Auto-reconnect if we were listening before
-                if self.was_listening_before_flash && !self.listening {
-                    if let Some(port) = &self.settings.serial_port {
-                        if self.available_ports.contains(port) {
-                            return self.update(Message::StartListening);
-                        }
-                    }
+                if self.was_listening_before_flash
+                    && !self.listening
+                    && let Some(port) = &self.settings.serial_port
+                    && self.available_ports.contains(port)
+                {
+                    return self.update(Message::StartListening);
                 }
                 Task::none()
             }

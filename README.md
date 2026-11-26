@@ -26,7 +26,7 @@ To use the snapshot view feature, you must install the modified firmware. For mo
 
 ## Requirements
 
-- Rust toolchain (stable, 2021 edition or later)
+- Rust toolchain (stable, 1.85 or later for the 2024 edition)
 - A USB-to-serial adapter connected to the target device (or integrated one)
 
 ## How to build

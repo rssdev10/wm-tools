@@ -41,18 +41,18 @@ impl log::Log for FileLogger {
         if record.level() <= self.stderr_level {
             eprint!("{line}");
         }
-        if let Ok(mut guard) = self.file.lock() {
-            if let Some(f) = guard.as_mut() {
-                let _ = f.write_all(line.as_bytes());
-            }
+        if let Ok(mut guard) = self.file.lock()
+            && let Some(f) = guard.as_mut()
+        {
+            let _ = f.write_all(line.as_bytes());
         }
     }
 
     fn flush(&self) {
-        if let Ok(mut g) = self.file.lock() {
-            if let Some(f) = g.as_mut() {
-                let _ = f.flush();
-            }
+        if let Ok(mut g) = self.file.lock()
+            && let Some(f) = g.as_mut()
+        {
+            let _ = f.flush();
         }
     }
 }
@@ -87,11 +87,11 @@ pub fn init() {
 
 fn rotate_if_needed(path: &PathBuf) {
     const MAX_BYTES: u64 = 1_000_000;
-    if let Ok(meta) = std::fs::metadata(path) {
-        if meta.len() > MAX_BYTES {
-            let backup = path.with_extension("log.1");
-            let _ = std::fs::rename(path, backup);
-        }
+    if let Ok(meta) = std::fs::metadata(path)
+        && meta.len() > MAX_BYTES
+    {
+        let backup = path.with_extension("log.1");
+        let _ = std::fs::rename(path, backup);
     }
 }
 

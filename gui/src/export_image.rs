@@ -220,15 +220,15 @@ pub fn export_png(
                            scale_margin_left, 0, graph_w, graph_h, trace_w, smooth, antialias);
             }
         }
-        if settings.show_ch2 {
-            if let Some(ch2) = &cap.ch2 {
-                if dot_mode {
-                    draw_dots(&mut pixels, width, height, ch2, PNG_CH2,
-                              scale_margin_left, 0, graph_w, graph_h, dot_radius, antialias);
-                } else {
-                    draw_trace(&mut pixels, width, height, ch2, PNG_CH2,
-                               scale_margin_left, 0, graph_w, graph_h, trace_w, smooth, antialias);
-                }
+        if settings.show_ch2
+            && let Some(ch2) = &cap.ch2
+        {
+            if dot_mode {
+                draw_dots(&mut pixels, width, height, ch2, PNG_CH2,
+                          scale_margin_left, 0, graph_w, graph_h, dot_radius, antialias);
+            } else {
+                draw_trace(&mut pixels, width, height, ch2, PNG_CH2,
+                           scale_margin_left, 0, graph_w, graph_h, trace_w, smooth, antialias);
             }
         }
         if settings.show_scales {
@@ -730,7 +730,7 @@ fn write_png(path: &Path, width: u32, height: u32, rgba: &[u8]) -> anyhow::Resul
     let mut encoder = png::Encoder::new(w, width, height);
     encoder.set_color(png::ColorType::Rgba);
     encoder.set_depth(png::BitDepth::Eight);
-    encoder.set_compression(png::Compression::Best);
+    encoder.set_compression(png::Compression::High);
 
     let mut writer = encoder.write_header()?;
     writer.write_image_data(rgba)?;

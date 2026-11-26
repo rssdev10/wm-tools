@@ -42,3 +42,22 @@ pub fn detect_system_language() -> String {
     }
     "en".into()
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn translations_load_for_every_language() {
+        // A missing locale file or a broken loader makes t! return the key.
+        for (code, _, _) in LANGUAGES {
+            let s = t!("app.no_capture_loaded", locale = code);
+            assert_ne!(s, "app.no_capture_loaded", "locale {code} not loaded");
+        }
+        assert_eq!(t!("app.title", locale = "en"), "DSO3D12 Viewer");
+        assert_ne!(
+            t!("app.no_capture_loaded", locale = "ru"),
+            t!("app.no_capture_loaded", locale = "en")
+        );
+    }
+}

@@ -70,7 +70,7 @@ pub fn column_spans(samples: &[u8], columns: usize) -> Vec<ColumnSpan> {
 /// Used by dot mode: in a column holding many samples, dots with the same
 /// value land on the same pixel, so drawing each distinct value once shows
 /// exactly the same picture with far fewer shapes.
-pub fn distinct_values(samples: &[u8]) -> impl Iterator<Item = u8> {
+pub fn distinct_values(samples: &[u8]) -> impl Iterator<Item = u8> + use<> {
     let mut seen = [false; 256];
     for &v in samples {
         seen[v as usize] = true;
