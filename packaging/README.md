@@ -7,4 +7,4 @@ This directory contains auxiliary files used to assemble portable release artifa
 - `macos/` holds macOS bundle metadata such as the `Info.plist` template.
 - `windows/` holds Windows-specific packaging notes.
 
-The release workflow in `.github/workflows/ci.yaml` consumes these files directly.
+The release workflow in `.github/workflows/release.yml` consumes these files directly.

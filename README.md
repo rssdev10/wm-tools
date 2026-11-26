@@ -125,14 +125,121 @@ Options:
 Repository: https://github.com/rssdev10/wm-tools
 ```
 
-## Running tests
+## Capture a screenshot packet (`capture`)
+
+Listens for the 2048-byte screenshot packet the oscilloscope sends when you open
+*Gallery* and select a saved waveform, then prints the parsed settings and samples:
 
 ```bash
-cargo test --workspace
+./target/release/capture -p /dev/tty.usbserial-1110 -s screen.bin
+./target/release/capture --load screen.bin -d dso3d12     # re-parse a saved packet
 ```
 
-## Linting
+Options: `-p/--port`, `-l/--list`, `-d/--device` (`dso3d12`, `dso2512g-v2`, `dso2512g-v1`),
+`-s/--save`, `--load`, `-t/--timeout` (seconds, `0` waits forever).
+
+## Development
+
+### Workspace layout
+
+Cargo workspace (`resolver = "2"`). Shared dependencies are in `[workspace.dependencies]`.
+
+| Package | Path | Purpose |
+|---------|------|---------|
+| `wm-tools` | `flasher/` | CLI binaries `flash` (XMODEM-1K flasher for W800/W801) and `capture` (screenshot packet listener). Has its own version. |
+| `dso-parser` | `dso-parser/` | Library: parses the ASCII debug dump and the binary screenshot packet into typed structs; `.zwcap` container. |
+| `dso3d12-gui` | `gui/` | Desktop viewer and firmware updater (iced 0.14). |
+
+### GUI modules (`gui/src/`)
+
+| File | Responsibility |
+|------|----------------|
+| `main.rs` | Boots `iced::application(App::new, App::update, App::view)` with `.subscription()`. |
+| `app.rs` | `App` state, messages, view composition, subscriptions; headless unit tests. |
+| `canvas.rs` | `Scope` canvas program: grid, traces, measurement and device cursors. |
+| `range_slider.rs` | Custom two-knob range slider widget (`canvas::Program`). |
+| `serial.rs` | Background serial listener: port list, auto-reconnect, capture detection. |
+| `flash.rs` | Background firmware update over XMODEM-1K. |
+| `export_image.rs` | PNG export (tiny-skia, antialiased text). |
+| `settings.rs` | JSON settings in `<config dir>/dso3d12-gui/settings.json`. |
+| `logging.rs` | Logger: stderr by default, file on request. |
+| `i18n.rs` | `rust-i18n` setup and system-locale detection. |
+
+### Threads and the serial port
+
+- The serial listener (`serial::start_listening`) and the firmware update
+  (`flash::start_flash`) each run on their own `std::thread`. They report to the GUI
+  through a `tokio::sync::mpsc` unbounded channel, which `App::subscription` polls.
+- Each thread is stopped through an `Arc<AtomicBool>` flag in its handle
+  (`SerialHandle`, `FlashHandle`); dropping a handle sets the flag and joins the thread.
+- The listener treats 500 ms without new bytes as the end of a capture, reads with a 100 ms
+  timeout so it notices the stop flag, and retries a lost port every 2 s.
+- A serial port has one owner at a time: the GUI stops the listener before it starts a
+  firmware update.
+- Opening a port can pulse DTR/RTS, which the DSO3D12 uses as reset lines. Where the platform
+  allows, the listener opens the port natively and clears both lines at once.
+
+### Cursor model
+
+The GUI has two independent kinds of cursors; never share state, sliders or toggles between
+them:
+
+1. **Measurement cursors**: set by the user with the right-hand two-knob range sliders, one
+   per axis. Drawn pink.
+2. **Device cursors**: read-only, taken from the capture's metadata and toggled from the
+   data-controls panel. The toggles are disabled when the capture has no device-cursor data.
+   Drawn green.
+
+### iced 0.14 notes
+
+- `iced::application(boot, update, view).title(...).theme(...).run()`: `boot` takes no arguments.
+- `Space::new().width(...).height(...)`, not `with_width`.
+- `checkbox(bool).label(s).on_toggle(fn)`; leave out `on_toggle` to render it disabled.
+- `iced::widget::rule::horizontal(px)` and `rule::vertical(px)`.
+- `canvas::Text { align_x, align_y, .. }`, not `horizontal_alignment`.
+- `canvas::Program::update(&self, &mut State, &Event, Rectangle, mouse::Cursor) -> Option<canvas::Action<Message>>`.
+  Emit messages with `canvas::Action::publish(msg).and_capture()` and request redraws with
+  `Action::request_redraw()`.
+- `canvas::Event` is `iced_core::event::Event` (mouse, keyboard, touch, window).
+
+### Device facts
+
+- Capture baud rate: 115200. The flasher negotiates up to 2 Mbps (see `-b`).
+- Acquisition buffer: 60 000 samples per channel.
+- Device variants with different packet fields: `dso3d12`, `dso2512g-v2`, `dso2512g-v1`.
+- The screenshot packet needs the ZeeTweak firmware; the debug dump works on stock firmware.
+
+### Documentation map
+
+| Document | Contents |
+|----------|----------|
+| [docs/GUI_DESIGN.md](docs/GUI_DESIGN.md) | GUI layout, panels, cursor model, serial behaviour, PNG export, settings, logging. |
+| [docs/USER_MANUAL.md](docs/USER_MANUAL.md) | End-user guide for the viewer. |
+| [docs/SCREENSHOT_PROTOCOL.md](docs/SCREENSHOT_PROTOCOL.md) | Screenshot packet layout, ADC-to-voltage conversion, settings offsets, variant differences. |
+| [packaging/README.md](packaging/README.md) | Files used to assemble the release packages. |
+
+### Testing and linting
 
 ```bash
-cargo clippy --workspace
+cargo test --workspace                                  # unit tests
+cargo clippy --workspace --all-targets -- -D warnings   # lint (must be warning-free)
 ```
+
+Tests live in the crate they test and need no serial device.
+
+### Localisation
+
+The GUI's strings are in `gui/locales/` (`en`, `ru`, `zh`, `es`, `hi`). Every key exists in
+all five files.
+
+### Diagnostics
+
+- `RUST_LOG` sets the GUI's stderr log level.
+- `DSO_LOG_FILE=1` also writes `<config dir>/dso3d12-gui/dso3d12-gui.log` (rotated at 1 MB).
+
+### Continuous integration and releases
+
+- `.github/workflows/tests.yml` builds, tests and runs clippy on Linux, Windows and macOS for
+  every pull request and every push to `main`.
+- `.github/workflows/release.yml` runs when a GitHub release is created. It builds `wm-tools`
+  and `dso3d12-gui` for each platform and attaches the packages assembled from `packaging/`.
