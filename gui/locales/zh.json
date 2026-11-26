@@ -41,6 +41,8 @@
   "label.voff": "偏置, V:",
   "label.tdiv": "时基, 毫秒:",
   "label.ac_mode": "交流模式: 8×V, 12×t 格",
+  "label.scale_from_metadata": "刻度来自捕获元数据（只读）",
+  "label.scale_manual": "手动刻度（捕获没有元数据）",
   "label.time_range": "时间: %{ms} 毫秒 (%{n} 采样)",
   "label.ch1_stats": "CH1: n=%{n} 最小值=%{min} 最大值=%{max} 平均值=%{avg}",
   "label.ch2_stats": "CH2: n=%{n} 最小值=%{min} 最大值=%{max} 平均值=%{avg}",

@@ -38,22 +38,135 @@ pub struct Scope<'a, Message = ()> {
     pub v_offset_ch2: f64,
     /// Active channel (0 = CH1, 1 = CH2). Used for device cursor voltage.
     pub active_channel: u8,
-    /// Callback message factory for graph clicks: (frac_x, frac_y).
-    pub on_click: Option<fn(f32, f32) -> Message>,
+    /// Message factory for measurement-cursor drags on the graph.
+    pub on_cursor_drag: Option<fn(CursorDrag) -> Message>,
 }
 
-/// State for cursor drag interaction on the scope canvas.
+/// State of the scope canvas: cursor drag interaction and the cached
+/// trace layer.
 #[derive(Default)]
 pub struct ScopeState {
     dragging: Option<DragTarget>,
+    /// Tessellated traces. Re-tessellating 60 000 samples on every mouse
+    /// move of a cursor drag is what made the GUI slow; the traces only
+    /// change when the data or the trace options do.
+    traces: canvas::Cache,
+    /// Fingerprint of everything the cached traces depend on.
+    traces_key: std::cell::Cell<Option<u64>>,
 }
 
-#[derive(Debug, Clone, Copy)]
-enum DragTarget {
-    XLow,
-    XHigh,
-    YLow,
-    YHigh,
+/// One knob of a measurement-cursor pair.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Knob {
+    /// First value of the `(low, high)` range.
+    Low,
+    /// Second value of the `(low, high)` range.
+    High,
+}
+
+/// The measurement-cursor lines grabbed by a drag: one line, or one X and
+/// one Y line together when the press was near where they cross.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DragTarget {
+    pub x: Option<Knob>,
+    pub y: Option<Knob>,
+}
+
+/// One step of a measurement-cursor drag: move the target lines to the
+/// pointer position, given as fractions (0.0..1.0) of the plot area.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct CursorDrag {
+    pub target: DragTarget,
+    pub frac_x: f32,
+    pub frac_y: f32,
+}
+
+/// A press within this distance (pixels) of the crossing of the nearest X
+/// and Y cursor lines drags both lines together.
+pub const CROSS_GRAB_RADIUS_PX: f32 = 12.0;
+/// The pointer within this distance (pixels) of a cursor line shows a
+/// resize pointer.
+const LINE_HOVER_PX: f32 = 6.0;
+
+/// Nearest knob of a cursor pair to `pos` along one axis, and its distance
+/// in pixels. When both knobs sit on the same pixel, the knob on the side the
+/// pointer is on wins, so the pair can be pulled apart in either direction.
+fn nearest_knob(pos: f32, origin: f32, extent: f32, (lo, hi): (f32, f32)) -> (Knob, f32) {
+    let p_lo = origin + lo.clamp(0.0, 1.0) * extent;
+    let p_hi = origin + hi.clamp(0.0, 1.0) * extent;
+    let d_lo = (pos - p_lo).abs();
+    let d_hi = (pos - p_hi).abs();
+    if d_lo < d_hi || (d_lo == d_hi && pos <= p_lo) {
+        (Knob::Low, d_lo)
+    } else {
+        (Knob::High, d_hi)
+    }
+}
+
+/// Decide which measurement-cursor lines a press at `pos` grabs.
+///
+/// Near the crossing of the nearest X and Y lines (within
+/// [`CROSS_GRAB_RADIUS_PX`]) both lines are grabbed; otherwise only the
+/// single nearest line, measured in pixels. Returns `None` when no
+/// measurement cursor is enabled.
+pub fn pick_drag_target(
+    pos: Point,
+    plot: Rectangle,
+    cursor_x: Option<(f32, f32)>,
+    cursor_y: Option<(f32, f32)>,
+) -> Option<DragTarget> {
+    let x = cursor_x.map(|r| nearest_knob(pos.x, plot.x, plot.width, r));
+    let y = cursor_y.map(|r| nearest_knob(pos.y, plot.y, plot.height, r));
+    let target = match (x, y) {
+        (None, None) => return None,
+        (Some((kx, _)), None) => DragTarget { x: Some(kx), y: None },
+        (None, Some((ky, _))) => DragTarget { x: None, y: Some(ky) },
+        (Some((kx, dx)), Some((ky, dy))) => {
+            if dx.hypot(dy) <= CROSS_GRAB_RADIUS_PX {
+                DragTarget { x: Some(kx), y: Some(ky) }
+            } else if dx <= dy {
+                DragTarget { x: Some(kx), y: None }
+            } else {
+                DragTarget { x: None, y: Some(ky) }
+            }
+        }
+    };
+    Some(target)
+}
+
+/// Convert a position (canvas coordinates) to plot fractions, clamped to
+/// the plot area so a drag that leaves the canvas pins the line to the edge.
+fn plot_fraction(pos: Point, plot: Rectangle) -> (f32, f32) {
+    let fx = if plot.width > 0.0 { (pos.x - plot.x) / plot.width } else { 0.0 };
+    let fy = if plot.height > 0.0 { (pos.y - plot.y) / plot.height } else { 0.0 };
+    (fx.clamp(0.0, 1.0), fy.clamp(0.0, 1.0))
+}
+
+/// Pointer shape for a drag target.
+fn interaction_for(target: DragTarget) -> mouse::Interaction {
+    match (target.x, target.y) {
+        (Some(_), Some(_)) => mouse::Interaction::Move,
+        (Some(_), None) => mouse::Interaction::ResizingHorizontally,
+        (None, Some(_)) => mouse::Interaction::ResizingVertically,
+        (None, None) => mouse::Interaction::default(),
+    }
+}
+
+/// The plot area (grid and traces) inside a canvas of `size`, leaving room
+/// for the scale labels when they are shown.
+pub fn plot_rect(size: Size, show_scales: bool, has_ch1: bool, has_ch2: bool) -> Rectangle {
+    let (left, bottom) = if show_scales {
+        let label_columns = u8::from(has_ch1) + u8::from(has_ch2);
+        (SCALE_MARGIN_LEFT * f32::from(label_columns), SCALE_MARGIN_BOTTOM)
+    } else {
+        (0.0, 0.0)
+    };
+    Rectangle {
+        x: left,
+        y: 0.0,
+        width: (size.width - left).max(0.0),
+        height: (size.height - bottom).max(0.0),
+    }
 }
 
 const BG: Color = Color::from_rgb(0.04, 0.06, 0.10);
@@ -88,119 +201,128 @@ impl<Message: Clone> canvas::Program<Message> for Scope<'_, Message> {
         bounds: Rectangle,
         cursor: mouse::Cursor,
     ) -> Option<canvas::Action<Message>> {
-        let on_click = self.on_click?;
-        let pos = cursor.position_in(bounds)?;
-        let gx = if self.show_scales {
-            match (self.has_ch1, self.has_ch2) {
-                (true, true) => SCALE_MARGIN_LEFT * 2.0,
-                (true, false) | (false, true) => SCALE_MARGIN_LEFT,
-                (false, false) => 0.0,
-            }
-        } else {
-            0.0
+        let on_cursor_drag = self.on_cursor_drag?;
+        let plot = plot_rect(bounds.size(), self.show_scales, self.has_ch1, self.has_ch2);
+        let step = |target: DragTarget, pos: Point| {
+            let (frac_x, frac_y) = plot_fraction(pos, plot);
+            canvas::Action::publish(on_cursor_drag(CursorDrag { target, frac_x, frac_y }))
+                .and_capture()
         };
-        let gw = bounds.width - gx;
-        let gy = if self.show_scales { SCALE_MARGIN_BOTTOM } else { 0.0 };
-        let gh = bounds.height - gy;
-        let frac_x = ((pos.x - gx) / gw).clamp(0.0, 1.0);
-        let frac_y = (pos.y / gh).clamp(0.0, 1.0);
 
         match event {
             canvas::Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Left)) => {
-                // Determine which cursor line is nearest and start drag
-                let mut best_dist = f32::MAX;
-                let mut target: Option<DragTarget> = None;
-
-                if let Some((lo, hi)) = self.meas_cursor_x {
-                    let d_lo = (frac_x - lo).abs();
-                    let d_hi = (frac_x - hi).abs();
-                    if d_lo < best_dist {
-                        best_dist = d_lo;
-                        target = Some(DragTarget::XLow);
-                    }
-                    if d_hi < best_dist {
-                        best_dist = d_hi;
-                        target = Some(DragTarget::XHigh);
-                    }
-                }
-                if let Some((lo, hi)) = self.meas_cursor_y {
-                    let d_lo = (frac_y - lo).abs();
-                    let d_hi = (frac_y - hi).abs();
-                    if d_lo < best_dist {
-                        best_dist = d_lo;
-                        target = Some(DragTarget::YLow);
-                    }
-                    if d_hi < best_dist {
-                        // best_dist = d_hi; // not needed, last comparison
-                        target = Some(DragTarget::YHigh);
-                    }
-                }
-
-                let _ = best_dist;
-                state.dragging = target;
-                let msg = on_click(frac_x, frac_y);
-                Some(canvas::Action::publish(msg).and_capture())
+                // Only a press inside the canvas starts a drag.
+                let pos = cursor.position_in(bounds)?;
+                let target =
+                    pick_drag_target(pos, plot, self.meas_cursor_x, self.meas_cursor_y)?;
+                state.dragging = Some(target);
+                Some(step(target, pos))
             }
-            canvas::Event::Mouse(mouse::Event::CursorMoved { .. }) => {
-                if state.dragging.is_some() {
-                    let msg = on_click(frac_x, frac_y);
-                    Some(canvas::Action::publish(msg).and_capture())
-                } else {
-                    None
-                }
+            canvas::Event::Mouse(mouse::Event::CursorMoved { position }) => {
+                // Keep following the pointer after it leaves the canvas; the
+                // position is clamped to the plot edge.
+                let target = state.dragging?;
+                let pos = Point::new(position.x - bounds.x, position.y - bounds.y);
+                Some(step(target, pos))
             }
             canvas::Event::Mouse(mouse::Event::ButtonReleased(mouse::Button::Left)) => {
-                if state.dragging.take().is_some() {
-                    Some(canvas::Action::request_redraw())
-                } else {
-                    None
-                }
+                // Handled wherever the pointer is, so a release outside the
+                // canvas cannot leave a drag stuck.
+                state
+                    .dragging
+                    .take()
+                    .map(|_| canvas::Action::request_redraw())
             }
             _ => None,
         }
     }
 
+    fn mouse_interaction(
+        &self,
+        state: &Self::State,
+        bounds: Rectangle,
+        cursor: mouse::Cursor,
+    ) -> mouse::Interaction {
+        if let Some(target) = state.dragging {
+            return interaction_for(target);
+        }
+        if self.on_cursor_drag.is_none() {
+            return mouse::Interaction::default();
+        }
+        let Some(pos) = cursor.position_in(bounds) else {
+            return mouse::Interaction::default();
+        };
+        let plot = plot_rect(bounds.size(), self.show_scales, self.has_ch1, self.has_ch2);
+        let Some(target) = pick_drag_target(pos, plot, self.meas_cursor_x, self.meas_cursor_y)
+        else {
+            return mouse::Interaction::default();
+        };
+        // A press anywhere moves the nearest line; show the resize pointer
+        // only when the pointer is actually on a line or the crossing.
+        let near = |range: Option<(f32, f32)>, p: f32, o: f32, e: f32| {
+            range.is_some_and(|r| nearest_knob(p, o, e, r).1 <= LINE_HOVER_PX)
+        };
+        let on_x = near(self.meas_cursor_x, pos.x, plot.x, plot.width);
+        let on_y = near(self.meas_cursor_y, pos.y, plot.y, plot.height);
+        let on_target = match (target.x, target.y) {
+            (Some(_), Some(_)) => true,
+            (Some(_), None) => on_x,
+            (None, Some(_)) => on_y,
+            (None, None) => false,
+        };
+        if on_target {
+            interaction_for(target)
+        } else {
+            mouse::Interaction::default()
+        }
+    }
+
     fn draw(
         &self,
-        _state: &Self::State,
+        state: &Self::State,
         renderer: &Renderer,
         _theme: &Theme,
         bounds: Rectangle,
         _cursor: mouse::Cursor,
     ) -> Vec<Geometry> {
-        let mut frame = Frame::new(renderer, bounds.size());
+        // Three layers, drawn in order: background and grid, traces (cached),
+        // then cursors and labels on top.
+        let mut base = Frame::new(renderer, bounds.size());
 
         // Background.
-        let area = Path::rectangle(Point::ORIGIN, frame.size());
-        frame.fill(&area, BG);
+        let area = Path::rectangle(Point::ORIGIN, base.size());
+        base.fill(&area, BG);
 
-        let gx = if self.show_scales {
-            match (self.has_ch1, self.has_ch2) {
-                (true, true) => SCALE_MARGIN_LEFT * 2.0,
-                (true, false) | (false, true) => SCALE_MARGIN_LEFT,
-                (false, false) => 0.0,
-            }
-        } else {
-            0.0
-        };
-        let gy = if self.show_scales { SCALE_MARGIN_BOTTOM } else { 0.0 };
-        let gw = frame.width() - gx;
-        let gh = frame.height() - gy;
+        let plot = plot_rect(bounds.size(), self.show_scales, self.has_ch1, self.has_ch2);
+        let gx = plot.x;
+        let gw = plot.width;
+        let gh = plot.height;
 
-        draw_grid(&mut frame, bounds.size(), gx, gy);
+        draw_grid(&mut base, bounds.size(), gx, bounds.height - gh);
 
-        if let Some(cap) = self.capture {
-            // Draw traces for each enabled channel.
+        let key = self.traces_key(plot);
+        if state.traces_key.get() != Some(key) {
+            state.traces.clear();
+            state.traces_key.set(Some(key));
+        }
+        let traces = state.traces.draw(renderer, bounds.size(), |frame| {
+            let Some(cap) = self.capture else { return };
+            // Draw traces for each enabled channel. draw_trace() clips them
+            // to the plot area so off-screen samples do not run over the
+            // scale labels.
             let channels = [
                 (self.show_ch1, Some(&cap.ch1[..]) as Option<&[u8]>, CH1_COLOR),
                 (self.show_ch2, cap.ch2.as_deref(), CH2_COLOR),
             ];
             for &(show, data, color) in &channels {
                 if let Some(samples) = show.then_some(data).flatten() {
-                    draw_trace(&mut frame, samples, color, self.view_mode, gx, gh);
+                    draw_trace(frame, samples, color, self.view_mode, plot);
                 }
             }
-        } else {
+        });
+
+        let mut frame = Frame::new(renderer, bounds.size());
+        if self.capture.is_none() {
             let text = Text {
                 content: crate::i18n::t!("app.no_capture_loaded").to_string(),
                 position: Point::new(gx + gw / 2.0, gh / 2.0),
@@ -312,7 +434,28 @@ impl<Message: Clone> canvas::Program<Message> for Scope<'_, Message> {
             );
         }
 
-        vec![frame.into_geometry()]
+        vec![base.into_geometry(), traces, frame.into_geometry()]
+    }
+}
+
+impl<Message> Scope<'_, Message> {
+    /// Fingerprint of everything the trace layer depends on: the samples,
+    /// the trace options and the plot area. Hashing 2 × 60 000 bytes takes
+    /// microseconds, far less than tessellating them.
+    fn traces_key(&self, plot: Rectangle) -> u64 {
+        use std::hash::{Hash, Hasher};
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        if let Some(cap) = self.capture {
+            cap.ch1.hash(&mut h);
+            cap.ch2.hash(&mut h);
+        } else {
+            0u8.hash(&mut h);
+        }
+        (self.show_ch1, self.show_ch2, self.view_mode as u8).hash(&mut h);
+        for v in [plot.x, plot.y, plot.width, plot.height] {
+            v.to_bits().hash(&mut h);
+        }
+        h.finish()
     }
 }
 
@@ -432,65 +575,96 @@ fn draw_scales(
     }
 }
 
-fn draw_trace(frame: &mut Frame, samples: &[u8], color: Color, mode: ViewMode, margin_left: f32, graph_height: f32) {
+/// Draw one channel's trace into `plot`.
+///
+/// Line and dot modes keep every sample's contribution: with more samples
+/// than pixel columns, each column draws the min/max of its samples (line)
+/// or each distinct value once (dot), so a single-sample spike stays
+/// visible. Smooth mode is a deliberate visual filter and averages.
+fn draw_trace(frame: &mut Frame, samples: &[u8], color: Color, mode: ViewMode, plot: Rectangle) {
     if samples.is_empty() {
         return;
     }
-    let size = frame.size();
     let n = samples.len();
     let stroke = Stroke::default().with_color(color).with_width(1.2);
+    let columns = (plot.width as usize).max(2);
 
-    // x maps sample i -> pixel; downsample so we never draw more vertices than pixels.
-    let gw = size.width - margin_left;
-    let max_pts = (gw as usize).max(2);
-    let step = n.div_ceil(max_pts).max(1);
+    // Sample index (possibly fractional) -> x pixel, so that sample 0 is on
+    // the left edge and sample n-1 on the right edge.
+    let x_at = |i: f32| plot.x + i / (n - 1).max(1) as f32 * plot.width;
+    // Capture values use screen-coordinate convention: low value = top
+    // of screen = positive voltage, high value = bottom = negative voltage.
+    // Use device pixel density: GRID_HEIGHT_PX = V_CELLS × PX_PER_DIV.
+    let y_at =
+        |v: f32| plot.y + (((v - PX_PER_DIV as f32) as f64 / GRID_HEIGHT_PX) * plot.height as f64) as f32;
+    // Representative x of a column: the middle of its sample range.
+    let column_x = |s: &crate::plot::ColumnSpan| x_at((s.start + s.end - 1) as f32 / 2.0);
+    let (top, bottom) = (plot.y, plot.y + plot.height);
 
-    let value_at = |i: usize| -> f32 {
-        match mode {
-            ViewMode::Smooth => {
-                // Moving average with a small window relative to downsampling step.
-                let half = (step / 2).max(2);
-                let lo = i.saturating_sub(half);
-                let hi = (i + half + 1).min(n);
-                let sum: u32 = samples[lo..hi].iter().map(|&b| b as u32).sum();
-                sum as f32 / (hi - lo) as f32
+    // Stroke the parts of a polyline that are inside the plot area.
+    let mut stroke_clipped = |points: Vec<(f32, f32)>| {
+        let runs = crate::plot::clip_polyline_y(&points, top, bottom);
+        let path = Path::new(|builder| {
+            for run in runs.iter().filter(|r| r.len() >= 2) {
+                builder.move_to(Point::new(run[0].0, run[0].1));
+                for &(x, y) in &run[1..] {
+                    builder.line_to(Point::new(x, y));
+                }
             }
-            _ => samples[i] as f32,
-        }
-    };
-
-    let to_xy = |i: usize, v: f32| -> Point {
-        let x = margin_left + (i as f32 / (n - 1).max(1) as f32) * gw;
-        // Capture values use screen-coordinate convention: low value = top
-        // of screen = positive voltage, high value = bottom = negative voltage.
-        // Use device pixel density: GRID_HEIGHT_PX = V_CELLS × PX_PER_DIV.
-        let y = (((v - PX_PER_DIV as f32) as f64 / GRID_HEIGHT_PX) * graph_height as f64) as f32;
-        Point::new(x, y)
+        });
+        frame.stroke(&path, stroke);
     };
 
     match mode {
         ViewMode::Dot => {
-            let r = 1.2;
-            for i in (0..n).step_by(step) {
-                let p = to_xy(i, value_at(i));
-                let dot = Path::circle(p, r);
-                frame.fill(&dot, color);
+            const R: f32 = 1.2;
+            let mut dots: Vec<(f32, f32)> = Vec::new();
+            if n <= columns {
+                dots.extend(samples.iter().enumerate().map(|(i, &v)| (x_at(i as f32), y_at(v as f32))));
+            } else {
+                for span in crate::plot::column_spans(samples, columns) {
+                    let x = column_x(&span);
+                    dots.extend(
+                        crate::plot::distinct_values(&samples[span.start..span.end])
+                            .map(|v| (x, y_at(v as f32))),
+                    );
+                }
+            }
+            // Off-screen samples get no dot (same as the PNG export). Each
+            // dot is a small square through iced's rectangle fast path:
+            // at this size it looks like a round dot. Putting thousands of
+            // overlapping circles in one path is very slow, because the fill
+            // tessellator must resolve every overlap.
+            let size = Size::new(2.0 * R, 2.0 * R);
+            for &(x, y) in dots.iter().filter(|d| (top..=bottom).contains(&d.1)) {
+                frame.fill_rectangle(Point::new(x - R, y - R), size, color);
             }
         }
-        ViewMode::Line | ViewMode::Smooth => {
-            let path = Path::new(|builder| {
-                let mut started = false;
-                for i in (0..n).step_by(step) {
-                    let p = to_xy(i, value_at(i));
-                    if started {
-                        builder.line_to(p);
-                    } else {
-                        builder.move_to(p);
-                        started = true;
-                    }
-                }
-            });
-            frame.stroke(&path, stroke);
+        ViewMode::Line => {
+            let points = if n <= columns {
+                samples.iter().enumerate().map(|(i, &v)| (x_at(i as f32), y_at(v as f32))).collect()
+            } else {
+                crate::plot::column_spans(samples, columns)
+                    .iter()
+                    .flat_map(|s| {
+                        let x = column_x(s);
+                        s.ordered().map(|v| (x, y_at(v as f32)))
+                    })
+                    .collect()
+            };
+            stroke_clipped(points);
+        }
+        ViewMode::Smooth => {
+            // Moving average with a small window relative to the decimation step.
+            let step = n.div_ceil(columns).max(1);
+            let half = (step / 2).max(2);
+            let value_at = |i: usize| -> f32 {
+                let lo = i.saturating_sub(half);
+                let hi = (i + half + 1).min(n);
+                let sum: u32 = samples[lo..hi].iter().map(|&b| b as u32).sum();
+                sum as f32 / (hi - lo) as f32
+            };
+            stroke_clipped((0..n).step_by(step).map(|i| (x_at(i as f32), y_at(value_at(i)))).collect());
         }
     }
 }
@@ -588,5 +762,91 @@ pub fn format_duration_ms_scale(ms: f64) -> String {
         format!("{:.0}µs", ms * 1000.0)
     } else {
         format!("{:.0}ns", ms * 1_000_000.0)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 1000 × 800 plot at the canvas origin: fractions map to round pixels.
+    const PLOT: Rectangle = Rectangle { x: 0.0, y: 0.0, width: 1000.0, height: 800.0 };
+    const X: Option<(f32, f32)> = Some((0.2, 0.6)); // lines at x = 200, 600
+    const Y: Option<(f32, f32)> = Some((0.25, 0.75)); // lines at y = 200, 600
+
+    fn pick(x: f32, y: f32) -> Option<DragTarget> {
+        pick_drag_target(Point::new(x, y), PLOT, X, Y)
+    }
+
+    #[test]
+    fn press_near_crossing_grabs_both_lines() {
+        let both = DragTarget { x: Some(Knob::High), y: Some(Knob::Low) };
+        assert_eq!(pick(600.0, 200.0), Some(both));
+        assert_eq!(pick(608.0, 208.0), Some(both)); // 11.3 px away
+    }
+
+    #[test]
+    fn press_outside_crossing_radius_grabs_one_line() {
+        // On the X line but 50 px below the crossing.
+        assert_eq!(pick(601.0, 250.0), Some(DragTarget { x: Some(Knob::High), y: None }));
+        // On the Y line, far from any X line.
+        assert_eq!(pick(400.0, 598.0), Some(DragTarget { x: None, y: Some(Knob::High) }));
+        // Just outside the radius diagonally: the closer line wins.
+        assert_eq!(pick(609.0, 210.0), Some(DragTarget { x: Some(Knob::High), y: None }));
+    }
+
+    #[test]
+    fn distance_is_compared_in_pixels_not_fractions() {
+        // 30 px from the X line (0.03 of the width) and 40 px from the Y line
+        // (0.05 of the height): the X line is nearer in pixels and in fractions.
+        assert_eq!(pick(230.0, 240.0).unwrap(), DragTarget { x: Some(Knob::Low), y: None });
+        // Wide plot: 50 px from the X line is 0.025 of 2000 px, 40 px from the
+        // Y line is 0.05 of 800 px. Fractions would pick X; pixels pick Y.
+        let wide = Rectangle { width: 2000.0, ..PLOT };
+        let t = pick_drag_target(Point::new(450.0, 240.0), wide, X, Y).unwrap();
+        assert_eq!(t, DragTarget { x: None, y: Some(Knob::Low) });
+    }
+
+    #[test]
+    fn single_axis_and_disabled_cursors() {
+        let p = Point::new(10.0, 10.0);
+        assert_eq!(pick_drag_target(p, PLOT, None, None), None);
+        assert_eq!(
+            pick_drag_target(p, PLOT, X, None),
+            Some(DragTarget { x: Some(Knob::Low), y: None })
+        );
+        assert_eq!(
+            pick_drag_target(p, PLOT, None, Y),
+            Some(DragTarget { x: None, y: Some(Knob::Low) })
+        );
+    }
+
+    #[test]
+    fn coincident_knobs_split_towards_the_pointer() {
+        let same = Some((0.5, 0.5)); // both X lines at x = 500
+        let right = pick_drag_target(Point::new(520.0, 0.0), PLOT, same, None).unwrap();
+        assert_eq!(right.x, Some(Knob::High));
+        let left = pick_drag_target(Point::new(480.0, 0.0), PLOT, same, None).unwrap();
+        assert_eq!(left.x, Some(Knob::Low));
+    }
+
+    #[test]
+    fn plot_fraction_clamps_outside_the_plot() {
+        let plot = Rectangle { x: 80.0, y: 0.0, width: 400.0, height: 200.0 };
+        assert_eq!(plot_fraction(Point::new(280.0, 50.0), plot), (0.5, 0.25));
+        assert_eq!(plot_fraction(Point::new(-30.0, 900.0), plot), (0.0, 1.0));
+    }
+
+    #[test]
+    fn plot_rect_reserves_scale_margins() {
+        let size = Size::new(600.0, 400.0);
+        let full = plot_rect(size, false, true, true);
+        assert_eq!(full, Rectangle { x: 0.0, y: 0.0, width: 600.0, height: 400.0 });
+        let one = plot_rect(size, true, true, false);
+        assert_eq!(one.x, SCALE_MARGIN_LEFT);
+        assert_eq!(one.height, 400.0 - SCALE_MARGIN_BOTTOM);
+        let two = plot_rect(size, true, true, true);
+        assert_eq!(two.x, SCALE_MARGIN_LEFT * 2.0);
+        assert_eq!(two.width, 600.0 - SCALE_MARGIN_LEFT * 2.0);
     }
 }

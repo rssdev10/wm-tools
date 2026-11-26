@@ -53,9 +53,28 @@ This document describes the GUI layout, interaction model and state of the
 Custom `iced::widget::canvas` (`canvas.rs`, `Scope`). 10×8 grid, centred axes,
 yellow CH1, cyan CH2. Renders:
 * Traces in **Line / Dot / Smooth** mode (smooth = moving average).
+  Traces are clipped to the grid area, so off-screen samples never run
+  over the scale labels. The clipping is done on the trace geometry
+  (`plot::clip_polyline_y`), not with `Frame::with_clip`: in iced 0.14 a
+  clipped sub-frame is drawn before the parent frame's own shapes, so the
+  opaque background covered the traces.
+  The canvas draws three layers: background and grid, traces, then cursors
+  and labels. The trace layer is cached (`canvas::Cache` in `ScopeState`)
+  and rebuilt only when the samples, the trace options or the plot size
+  change, so dragging a cursor does not re-tessellate 60 000 samples.
+  Dot mode draws each dot as a small square through iced's rectangle fast
+  path; one path of thousands of overlapping circles was very slow to fill. Line and Dot modes never drop samples: with more
+  samples than pixel columns, each column draws the min/max of its samples
+  (Line) or each distinct value once (Dot), so single-sample spikes stay
+  visible (`plot.rs`, shared with the PNG export). Only Smooth averages.
 * Pink interactive cursors (range-shaded) for **measurement cursors**.
-  Cursors can also be moved by clicking/dragging directly on the graph
-  (nearest cursor line snaps to click position).
+  Cursors can also be moved by clicking/dragging directly on the graph.
+  A press moves the single nearest cursor line (distance measured in
+  pixels). A press within 12 px of the crossing of the nearest X and Y
+  lines drags both lines together. The pointer changes to a resize/move
+  shape over a line or crossing. A drag keeps following the pointer when it
+  leaves the canvas (the line stops at the plot edge) and ends on release
+  anywhere.
 * Green thin lines for **device cursors** (data-supplied, read-only) with
   numeric labels (sample numbers for X, voltage for Y).
 * Optional **axis scales** toggled via "Show scales" setting. Scale values
@@ -79,14 +98,22 @@ When capture metadata includes probe-mode information (×1, ×10, ×100), a
 **Probe:** row is shown beneath V/div, and probe + coupling info appear in the
 Trigger section.
 
-When a capture arrives via the **screenshot protocol** (live), V/div, V/offset
-and t/div are **automatically filled** from the packet's embedded settings
-metadata. The same auto-population applies when **switching between captures**
-in the thumbnail strip — clicking a screenshot capture applies its `scope_state`
-settings. For single-capture `.zwcap` or `.bin` files, settings are applied
-automatically on load. For multi-capture files, select the desired capture
-from the thumbnails to apply its settings. ASCII dumps (without metadata)
-retain the last-used settings.
+**Each capture keeps its own scale** (`scale.rs`, `CaptureScale`):
+
+* A capture **with metadata** (`record.scope_state`: screenshot packets and
+  `.zwcap` records saved from them) is drawn, measured and exported with the
+  V/div, V/off and t/div from its metadata. The inputs show these values
+  read-only (`text_input` without `on_input`), with the note "Scales from
+  capture metadata". A value missing from the metadata (a channel that was
+  off) falls back to the manual value.
+* A capture **without metadata** (ASCII debug dump) uses the **manual scale**
+  stored in `settings.json`. The inputs are editable, with the note "Manual
+  scales".
+
+Receiving, loading or selecting a capture never writes to the manual scale,
+so one capture's scale cannot leak into another. The canvas, the measurement
+panel and PNG export (including export of a capture that is not shown, from
+the thumbnail context menu) all take the scale of their own capture.
 
 **Signal information** (shown when a capture is loaded):
 * Voltage range for CH1/CH2 (computed from V/div × 8 divs, centered at 0).
@@ -197,6 +224,11 @@ traces, written as a valid PNG file using a minimal built-in encoder (no
 external image crate needed). Filename is auto-generated as
 `capture_YYYYMMDD_HHMMSS.png` saved to the Downloads directory (no file picker).
 
+The export keeps as much of the input data as possible: Line mode draws the
+per-column min/max envelope when there are more samples than columns (and
+interpolates linearly when there are fewer), and Dot mode draws every sample
+(dots on the same spot are drawn once). Only Smooth mode filters the data.
+
 ## Persisted state (`settings.json`)
 
 ```jsonc
@@ -241,5 +273,6 @@ Default level: info; override with `RUST_LOG`.
   where `v` = screen-coordinate ADC value (0 = top, 255 = bottom) and
   25 = pixels per division. This matches the DSO3D12's own `pixel_to_volts`.
 * Time axis = 12 divisions × t/div (ms).
-* When receiving screenshot packets or loading `.zwcap` files with metadata,
-  V/div, V/offset, t/div and probe mode are auto-filled from device metadata.
+* Captures with metadata (screenshot packets, `.zwcap` records with
+  `scope_state`) are shown with their own V/div, V/offset, t/div and probe
+  mode; captures without metadata use the manual scale (see above).

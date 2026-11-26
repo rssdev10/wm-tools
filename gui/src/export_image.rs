@@ -9,6 +9,7 @@ use std::path::Path;
 use dso_parser::{ADC_VALUE_MID, Capture};
 use crate::canvas::format_duration_ms_scale;
 use crate::canvas::{GRID_HEIGHT_PX, PX_PER_DIV, T_CELLS, V_CELLS};
+use crate::scale::CaptureScale;
 use crate::settings::{Settings, ViewMode};
 
 // ── Colour palette (mirrors canvas.rs constants) ───────────────────────────
@@ -79,8 +80,15 @@ impl PngExportConfig {
 
 // ── Main entry point ───────────────────────────────────────────────────────
 
-/// Export the current capture as a PNG image.
-pub fn export_png(path: &Path, cap: &Capture, settings: &Settings) -> anyhow::Result<()> {
+/// Export a capture as a PNG image, labelled with that capture's `scale`
+/// (its metadata scale, or the manual scale; see `scale.rs`). Display
+/// options (channels, view mode, size) come from `settings`.
+pub fn export_png(
+    path: &Path,
+    cap: &Capture,
+    scale: &CaptureScale,
+    settings: &Settings,
+) -> anyhow::Result<()> {
     let config = PngExportConfig { target_width: settings.png_export_width };
 
     let graph_w = config.graph_w();
@@ -100,7 +108,7 @@ pub fn export_png(path: &Path, cap: &Capture, settings: &Settings) -> anyhow::Re
 
     // RGBA pixel buffer for tiny-skia.
     let mut pixels = vec![0u8; (width * height * 4) as usize];
-    for chunk in pixels.chunks_exact_mut(4) {
+    for chunk in pixels.as_chunks_mut::<4>().0 {
         chunk.copy_from_slice(&[PNG_BG[0], PNG_BG[1], PNG_BG[2], 255]);
     }
 
@@ -137,7 +145,7 @@ pub fn export_png(path: &Path, cap: &Capture, settings: &Settings) -> anyhow::Re
     };
 
     // ── Scale labels ─────────────────────────────────────────────────
-    let t_per_div_ms = settings.t_per_div_ms;
+    let t_per_div_ms = scale.t_per_div_ms;
     let draw_scales_on_region =
         |pixels: &mut [u8], x_off: u32, y_off: u32, w: u32, h: u32, _n_samples: usize,
          vpd_ch1: f64, vo_ch1: f64, ch1_color: Option<[u8; 3]>,
@@ -194,12 +202,12 @@ pub fn export_png(path: &Path, cap: &Capture, settings: &Settings) -> anyhow::Re
     if do_split {
         let ch1_col = settings.show_scales.then_some(PNG_CH1);
         draw_one(&mut pixels, &cap.ch1, PNG_CH1, 0,
-                 settings.v_per_div_ch1, settings.v_offset_ch1, ch1_col);
+                 scale.v_per_div_ch1, scale.v_offset_ch1, ch1_col);
 
         let ch2_col = settings.show_scales.then_some(PNG_CH2);
         if let Some(ch2) = &cap.ch2 {
             draw_one(&mut pixels, ch2, PNG_CH2, graph_h + scale_margin_bottom,
-                     settings.v_per_div_ch2, settings.v_offset_ch2, ch2_col);
+                     scale.v_per_div_ch2, scale.v_offset_ch2, ch2_col);
         }
     } else {
         draw_grid_on(&mut pixels, 0);
@@ -228,8 +236,8 @@ pub fn export_png(path: &Path, cap: &Capture, settings: &Settings) -> anyhow::Re
             let ch2_col = if settings.show_ch2 && has_ch2 { Some(PNG_CH2) } else { None };
             draw_scales_on_region(
                 &mut pixels, scale_margin_left, 0, graph_w, graph_h, cap.ch1.len(),
-                settings.v_per_div_ch1, settings.v_offset_ch1, ch1_col,
-                settings.v_per_div_ch2, settings.v_offset_ch2, ch2_col,
+                scale.v_per_div_ch1, scale.v_offset_ch1, ch1_col,
+                scale.v_per_div_ch2, scale.v_offset_ch2, ch2_col,
             );
         }
     }
@@ -298,29 +306,12 @@ fn resample_waveform(
         return points;
     }
 
-    // Downscaling: min/max envelope per column.
-    let mut points = Vec::with_capacity(output_width as usize * 2);
-    for x in 0..output_width {
-        let start = x as usize * n / output_width as usize;
-        let end = ((x + 1) as usize * n / output_width as usize)
-            .max(start + 1)
-            .min(n);
-        let col = &samples[start..end];
-        let min = *col.iter().min().unwrap() as f64;
-        let max = *col.iter().max().unwrap() as f64;
-        let y_min = map_y(min);
-        let y_max = map_y(max);
-
-        // Preserve temporal direction.
-        if col.first() <= col.last() {
-            points.push((x as f32, y_min));
-            points.push((x as f32, y_max));
-        } else {
-            points.push((x as f32, y_max));
-            points.push((x as f32, y_min));
-        }
-    }
-    points
+    // Downscaling: min/max envelope per column, in temporal order.
+    crate::plot::column_spans(samples, output_width as usize)
+        .iter()
+        .enumerate()
+        .flat_map(|(x, span)| span.ordered().map(|v| (x as f32, map_y(v as f64))))
+        .collect()
 }
 
 /// Build an anti-aliased grid path via tiny-skia.
@@ -460,9 +451,10 @@ fn draw_trace(
     draw_run(&mut pixmap, &run);
 }
 
-/// Draw dots via tiny-skia (Dot mode). Each visible sample is rendered as a
-/// small filled circle. Samples outside the vertical mesh range are skipped;
-/// unlike line/smooth modes, dot mode never creates synthetic border points.
+/// Draw dots via tiny-skia (Dot mode). Every visible sample is rendered as a
+/// small filled circle — none are skipped, so a single-sample spike stays in
+/// the image. Samples outside the vertical mesh range are skipped; unlike
+/// line/smooth modes, dot mode never creates synthetic border points.
 ///
 /// When anti-aliasing is disabled, dots are drawn as individual pixels
 /// directly into the RGBA buffer — no scaling, no smoothing, no sub-pixel
@@ -486,11 +478,12 @@ fn draw_dots(
         return;
     }
 
-    let step = n.div_ceil(width as usize).max(1);
-    let sample_points = (0..n).step_by(step).filter_map(|i| {
-        let y = waveform_y(samples[i] as f64, height);
+    // Same x mapping as resample_waveform(): the last sample lands on the
+    // last pixel column of the graph, not one past it.
+    let sample_points = samples.iter().enumerate().filter_map(|(i, &v)| {
+        let y = waveform_y(v as f64, height);
         is_visible_y(y, height).then(|| {
-            let x = i as f64 / (n - 1).max(1) as f64 * width as f64;
+            let x = i as f64 / (n - 1).max(1) as f64 * (width - 1) as f64;
             (x as f32, y)
         })
     });
@@ -519,16 +512,19 @@ fn draw_dots(
     paint.set_color(rgb_color(color));
     paint.anti_alias = true;
 
+    // Dots that land on the same spot (common with 60 000 samples) are drawn
+    // once: rounding to a quarter pixel is invisible at any export size.
+    let mut seen = std::collections::HashSet::new();
+    let mut path = tiny_skia::PathBuilder::new();
     for (x, y) in sample_points {
-        let Some(circle) = tiny_skia::PathBuilder::from_circle(
-            x_off as f32 + x,
-            y_off as f32 + y,
-            dot_radius,
-        ) else {
-            continue;
-        };
+        if seen.insert(((x * 4.0).round() as i32, (y * 4.0).round() as i32)) {
+            path.push_circle(x_off as f32 + x, y_off as f32 + y, dot_radius);
+        }
+    }
+    // One fill for all dots; overlapping circles stay solid under Winding.
+    if let Some(path) = path.finish() {
         pixmap.fill_path(
-            &circle,
+            &path,
             &paint,
             tiny_skia::FillRule::Winding,
             tiny_skia::Transform::identity(),
@@ -739,4 +735,52 @@ fn write_png(path: &Path, width: u32, height: u32, rgba: &[u8]) -> anyhow::Resul
     let mut writer = encoder.write_header()?;
     writer.write_image_data(rgba)?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const W: u32 = 600;
+    const H: u32 = 400;
+
+    /// 60 000 flat samples at mid-screen with a single-sample spike that
+    /// every-N-th decimation (N = 100) would skip.
+    fn spiky_samples() -> Vec<u8> {
+        let mut s = vec![ADC_VALUE_MID; 60_000];
+        s[12_345] = 60;
+        s
+    }
+
+    /// Rows of an initially all-zero image that something was drawn on.
+    fn drawn_rows(pixels: &[u8]) -> Vec<u32> {
+        (0..H)
+            .filter(|&y| {
+                (0..W).any(|x| {
+                    let i = ((y * W + x) * 4) as usize;
+                    pixels[i..i + 4] != [0, 0, 0, 0]
+                })
+            })
+            .collect()
+    }
+
+    #[test]
+    fn dot_mode_keeps_a_single_sample_spike() {
+        let samples = spiky_samples();
+        let spike_y = waveform_y(60.0, H).round() as u32;
+        for antialias in [false, true] {
+            let mut pixels = vec![0u8; (W * H * 4) as usize];
+            draw_dots(&mut pixels, W, H, &samples, PNG_CH1, 0, 0, W, H, 1.0, antialias);
+            let rows = drawn_rows(&pixels);
+            assert!(rows.contains(&spike_y), "antialias={antialias}: spike row {spike_y} missing");
+        }
+    }
+
+    #[test]
+    fn line_mode_envelope_keeps_a_single_sample_spike() {
+        let points = resample_waveform(&spiky_samples(), W, H);
+        assert_eq!(points.len(), W as usize * 2);
+        let spike_y = waveform_y(60.0, H);
+        assert_eq!(points.iter().filter(|p| p.1 == spike_y).count(), 1);
+    }
 }

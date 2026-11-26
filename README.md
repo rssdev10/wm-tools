@@ -157,6 +157,8 @@ Cargo workspace (`resolver = "2"`). Shared dependencies are in `[workspace.depen
 | `main.rs` | Boots `iced::application(App::new, App::update, App::view)` with `.subscription()`. |
 | `app.rs` | `App` state, messages, view composition, subscriptions; headless unit tests. |
 | `canvas.rs` | `Scope` canvas program: grid, traces, measurement and device cursors. |
+| `plot.rs` | Renderer-neutral waveform helpers shared by the canvas and the PNG export (per-column min/max, so no samples are dropped; trace clipping). |
+| `scale.rs` | Per-capture display scale: from the capture's metadata, or the manual scale for captures without metadata. |
 | `range_slider.rs` | Custom two-knob range slider widget (`canvas::Program`). |
 | `serial.rs` | Background serial listener: port list, auto-reconnect, capture detection. |
 | `flash.rs` | Background firmware update over XMODEM-1K. |

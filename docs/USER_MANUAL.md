@@ -37,7 +37,8 @@ There are two independent capture methods:
 4. **Long-press Save** to initiate the debug data transmission.
 
 Transfers ~150–500 kB at 115200 baud. Delivers 60 000 raw ADC samples per
-channel. Use `V/div` and `t/div` in the Measurement panel to set the scale.
+channel. A debug dump carries no scale metadata: set `V/div`, `V/off` and
+`t/div` in the Measurement panel (see [Scale configuration](#scale-configuration)).
 
 #### Method 2 — Screenshot binary packet (display pixels)
 
@@ -47,8 +48,8 @@ channel. Use `V/div` and `t/div` in the Measurement panel to set the scale.
    binary packet** containing the 300 display pixels plus all instrument settings.
 
 The app detects this packet by its size and decodes the embedded calibration
-data to set `V/div`, `V/off`, `t/div` and **probe mode** (×1, ×10, ×100)
-automatically. Probe and coupling info are shown in the Measurement panel's
+data: the capture is shown with its own `V/div`, `V/off`, `t/div` and **probe
+mode** (×1, ×10, ×100). Probe and coupling info are shown in the Measurement panel's
 Trigger section, and the probe multiplier is reflected in the displayed V/div
 and V/off values.
 
@@ -65,13 +66,11 @@ Re-plug and the connection resumes without manual intervention.
 Click **Load Capture** and select a `.zwcap`, `.bin`, `.dat` or `.raw` file.
 Files can contain one or many consecutive captures.
 
-When loading files that contain embedded instrument metadata (`.zwcap` files
-or screenshot `.bin` files), the **V/div**, **V/off** and **t/div** settings
-are **automatically populated** from the capture data. You can still adjust
-them manually if needed.
-
-When switching between captures in the thumbnail strip, the scale settings
-update automatically for each capture that has embedded metadata.
+Each capture is shown with its own scale. Captures with embedded instrument
+metadata (screenshot packets, and `.zwcap` records saved from them) use the
+**V/div**, **V/off** and **t/div** the oscilloscope reported. Captures without
+metadata (debug dumps) use the manual scale from the Measurement panel. See
+[Scale configuration](#scale-configuration).
 
 ## Viewing the graph
 
@@ -96,9 +95,18 @@ the real scope). The DSO3D12 screen has **8 vertical** and **12 horizontal**
 divisions (AC mode). All voltage and time calculations, axis labels, and PNG
 scales use the per-channel values.
 
-When a capture arrives via the **screenshot protocol**, V/div and V/offset
-are automatically filled for each channel from the packet's embedded settings
-metadata (CH1 and CH2 separately).
+The scale fields depend on the capture being shown:
+
+* **Capture with metadata** (screenshot protocol, or a `.zwcap` record saved
+  from one): the fields show that capture's own V/div, V/off and t/div,
+  read-only. The note under the fields reads "Scales from capture metadata".
+* **Capture without metadata** (debug dump): the fields are editable and set
+  the **manual scale**, used for every capture without metadata. It is saved
+  between sessions. The note reads "Manual scales".
+
+Receiving or selecting a capture never changes the manual scale, so switching
+between a screenshot and a dump always shows each with the right scale. PNG
+export uses the scale of the capture being exported.
 
 ## Measurement cursors
 
@@ -110,7 +118,9 @@ In the right-hand **Measurement** panel:
 | ☐ Cursor Y (voltage) | Two knobs on vertical range | ΔV (volts) + absolute voltages per channel (CH1 and CH2) |
 
 **Drag the knob closest to your click** in the slider — or **click/drag
-directly on the graph** to move the nearest cursor line. The shaded band
+directly on the graph** to move the nearest cursor line. To move an X and a
+Y line together, press close to the point where they cross (within about
+12 pixels); the pointer changes to a move shape there. The shaded band
 between cursors is drawn on the canvas in pink and updates in real time.
 Y cursor voltages are computed independently for CH1 and CH2 using each
 channel's V/div and V/offset settings.

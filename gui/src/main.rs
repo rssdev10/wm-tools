@@ -8,7 +8,9 @@ mod export_image;
 mod flash;
 mod i18n;
 mod logging;
+mod plot;
 mod range_slider;
+mod scale;
 mod serial;
 mod settings;
 
