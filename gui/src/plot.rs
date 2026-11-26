@@ -78,28 +78,42 @@ pub fn distinct_values(samples: &[u8]) -> impl Iterator<Item = u8> {
     (0..=255u8).filter(move |&v| seen[v as usize])
 }
 
-/// Clip a polyline to the horizontal band `top..=bottom` (y grows downward).
+/// Axis-aligned clip rectangle (y grows downward).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ClipRect {
+    pub left: f32,
+    pub right: f32,
+    pub top: f32,
+    pub bottom: f32,
+}
+
+impl ClipRect {
+    pub fn contains(&self, p: (f32, f32)) -> bool {
+        (self.left..=self.right).contains(&p.0) && (self.top..=self.bottom).contains(&p.1)
+    }
+}
+
+/// Clip a polyline to `rect`.
 ///
-/// Returns the visible runs: each run is a polyline wholly inside the band.
-/// A segment that crosses the band edge is cut exactly at the edge, so the
-/// trace visibly reaches the border before it leaves the screen, like on
+/// Returns the visible runs: each run is a polyline wholly inside the
+/// rectangle. A segment that crosses an edge is cut exactly at the edge, so
+/// the trace visibly reaches the border before it leaves the screen, like on
 /// the oscilloscope. Clipping is done on the geometry itself so it does not
 /// depend on renderer clip support.
-pub fn clip_polyline_y(points: &[(f32, f32)], top: f32, bottom: f32) -> Vec<Vec<(f32, f32)>> {
-    let inside = |p: (f32, f32)| (top..=bottom).contains(&p.1);
+pub fn clip_polyline(points: &[(f32, f32)], rect: ClipRect) -> Vec<Vec<(f32, f32)>> {
     let mut runs = Vec::new();
     let mut run: Vec<(f32, f32)> = Vec::new();
     if let [only] = points {
-        if inside(*only) {
+        if rect.contains(*only) {
             runs.push(vec![*only]);
         }
         return runs;
     }
     for seg in points.windows(2) {
-        match clip_segment_y(seg[0], seg[1], top, bottom) {
+        match clip_segment(seg[0], seg[1], rect) {
             Some((a, b)) => {
                 // A new run starts when the segment does not continue the
-                // previous one (the trace left the band in between).
+                // previous one (the trace left the rectangle in between).
                 if run.last() != Some(&a) {
                     if run.len() >= 2 {
                         runs.push(std::mem::take(&mut run));
@@ -123,25 +137,35 @@ pub fn clip_polyline_y(points: &[(f32, f32)], top: f32, bottom: f32) -> Vec<Vec<
     runs
 }
 
-/// The part of segment `p → q` inside the band `top..=bottom`, if any.
+/// The part of segment `p → q` inside `rect`, if any (Liang–Barsky).
 /// Endpoints that are already inside are returned unchanged (bit-exact), so
 /// consecutive segments can be joined by comparing points.
-fn clip_segment_y(
-    p: (f32, f32),
-    q: (f32, f32),
-    top: f32,
-    bottom: f32,
-) -> Option<((f32, f32), (f32, f32))> {
-    let dy = q.1 - p.1;
-    if dy == 0.0 {
-        return (top..=bottom).contains(&p.1).then_some((p, q));
-    }
-    let t_top = (top - p.1) / dy;
-    let t_bottom = (bottom - p.1) / dy;
-    let t0 = t_top.min(t_bottom).max(0.0);
-    let t1 = t_top.max(t_bottom).min(1.0);
-    if t0 > t1 {
-        return None;
+fn clip_segment(p: (f32, f32), q: (f32, f32), rect: ClipRect) -> Option<((f32, f32), (f32, f32))> {
+    let (dx, dy) = (q.0 - p.0, q.1 - p.1);
+    let (mut t0, mut t1) = (0.0f32, 1.0f32);
+    // For each edge: (-direction, distance from p to the edge, inward).
+    for (pk, qk) in [
+        (-dx, p.0 - rect.left),
+        (dx, rect.right - p.0),
+        (-dy, p.1 - rect.top),
+        (dy, rect.bottom - p.1),
+    ] {
+        if pk == 0.0 {
+            // Parallel to this edge: entirely outside or not limited by it.
+            if qk < 0.0 {
+                return None;
+            }
+        } else {
+            let r = qk / pk;
+            if pk < 0.0 {
+                t0 = t0.max(r);
+            } else {
+                t1 = t1.min(r);
+            }
+            if t0 > t1 {
+                return None;
+            }
+        }
     }
     let at = |t: f32| {
         if t == 0.0 {
@@ -149,28 +173,265 @@ fn clip_segment_y(
         } else if t == 1.0 {
             q
         } else {
-            // A cut point lies on an edge; snap y onto it exactly so that
-            // rounding cannot leave it just outside the band.
-            let y = p.1 + dy * t;
-            let y = if (y - top).abs() < (y - bottom).abs() {
-                top
-            } else {
-                bottom
-            };
-            (p.0 + (q.0 - p.0) * t, y)
+            // A cut point lies on an edge; clamp it so that rounding cannot
+            // leave it just outside the rectangle.
+            (
+                (p.0 + dx * t).clamp(rect.left, rect.right),
+                (p.1 + dy * t).clamp(rect.top, rect.bottom),
+            )
         }
     };
     Some((at(t0), at(t1)))
+}
+
+/// The outermost range one axis of the view may show, in the same units
+/// as [`AxisView`].
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct AxisLimits {
+    pub lo: f64,
+    pub hi: f64,
+}
+
+impl AxisLimits {
+    fn width(self) -> f64 {
+        self.hi - self.lo
+    }
+}
+
+/// Time axis: the whole capture and nothing beyond it.
+pub const X_LIMITS: AxisLimits = AxisLimits { lo: 0.0, hi: 1.0 };
+
+/// The visible part of one axis, `lo..hi`, in "unit" coordinates: on the
+/// time axis a fraction of the whole capture, on the voltage axis a fraction
+/// of the device screen height (0 = top grid line, 1 = bottom grid line).
+/// [`AxisView::UNIT`] is the unzoomed view.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct AxisView {
+    pub lo: f64,
+    pub hi: f64,
+}
+
+impl Default for AxisView {
+    fn default() -> Self {
+        Self::UNIT
+    }
+}
+
+impl AxisView {
+    /// Unzoomed: the whole capture (time), the device screen (voltage).
+    pub const UNIT: Self = Self { lo: 0.0, hi: 1.0 };
+    /// Largest zoom-in, regardless of other limits.
+    const MIN_SPAN: f64 = 1e-6;
+
+    pub fn span(self) -> f64 {
+        self.hi - self.lo
+    }
+
+    pub fn is_unit(self) -> bool {
+        self == Self::UNIT
+    }
+
+    /// Unit coordinate -> fraction of the visible window (outside `0..=1`
+    /// for positions outside the view).
+    pub fn to_screen(self, data: f64) -> f64 {
+        (data - self.lo) / self.span()
+    }
+
+    /// Fraction of the visible window -> unit coordinate.
+    pub fn to_data(self, screen: f64) -> f64 {
+        self.lo + screen * self.span()
+    }
+
+    /// Zoom by `factor` (< 1 zooms in) keeping the point at window
+    /// fraction `anchor` fixed on screen. The span stays within
+    /// `min_span..=limits` and the window inside `limits`.
+    ///
+    /// Zooming through the unzoomed span stops exactly at [`Self::UNIT`]
+    /// (a detent), so the normal view is always easy to get back to even
+    /// after zooming around different points.
+    pub fn zoom_at(self, anchor: f64, factor: f64, min_span: f64, limits: AxisLimits) -> Self {
+        let anchor = anchor.clamp(0.0, 1.0);
+        let pivot = self.to_data(anchor);
+        let max_span = limits.width();
+        let span = (self.span() * factor).clamp(min_span.clamp(Self::MIN_SPAN, max_span), max_span);
+        let old = self.span();
+        let unit_allowed = limits.lo <= 0.0 && limits.hi >= 1.0;
+        if unit_allowed && ((old < 1.0 && span >= 1.0) || (old > 1.0 && span <= 1.0)) {
+            return Self::UNIT;
+        }
+        Self::within(pivot - anchor * span, span, limits)
+    }
+
+    /// Shift the window by `delta` (unit coordinates), stopping at the
+    /// limits.
+    pub fn pan(self, delta: f64, limits: AxisLimits) -> Self {
+        Self::within(self.lo + delta, self.span(), limits)
+    }
+
+    /// A window of `span` starting at `lo`, moved inside `limits`.
+    fn within(lo: f64, span: f64, limits: AxisLimits) -> Self {
+        if span >= limits.width() {
+            return Self {
+                lo: limits.lo,
+                hi: limits.hi,
+            };
+        }
+        let lo = lo.clamp(limits.lo, limits.hi - span);
+        Self { lo, hi: lo + span }
+    }
+}
+
+/// Zoom and pan of both axes.
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub struct View {
+    /// Time axis.
+    pub x: AxisView,
+    /// Voltage axis.
+    pub y: AxisView,
+}
+
+impl View {
+    /// Unzoomed on both axes.
+    pub const UNIT: Self = Self {
+        x: AxisView::UNIT,
+        y: AxisView::UNIT,
+    };
+
+    pub fn is_unit(self) -> bool {
+        self == Self::UNIT
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    /// A horizontal band with no left/right limit in practice.
+    fn band(top: f32, bottom: f32) -> ClipRect {
+        ClipRect {
+            left: -1e6,
+            right: 1e6,
+            top,
+            bottom,
+        }
+    }
+
+    #[test]
+    fn polyline_is_cut_at_left_and_right_edges() {
+        let rect = ClipRect {
+            left: 10.0,
+            right: 20.0,
+            top: 0.0,
+            bottom: 100.0,
+        };
+        let runs = clip_polyline(&[(0.0, 50.0), (15.0, 50.0), (30.0, 80.0)], rect);
+        assert_eq!(runs, vec![vec![(10.0, 50.0), (15.0, 50.0), (20.0, 60.0)]]);
+    }
+
+    #[test]
+    fn diagonal_through_a_corner_region_is_cut_on_both_axes() {
+        let rect = ClipRect {
+            left: 0.0,
+            right: 10.0,
+            top: 0.0,
+            bottom: 10.0,
+        };
+        // From (-5, 5) to (5, 15): enters at x = 0 (y = 10), i.e. the corner.
+        let runs = clip_polyline(&[(-5.0, 5.0), (5.0, 15.0)], rect);
+        assert!(runs.is_empty() || runs[0].iter().all(|&p| rect.contains(p)));
+        // From (-5, 2) to (5, 12): visible from (0, 7) to (3, 10).
+        let runs = clip_polyline(&[(-5.0, 2.0), (5.0, 12.0)], rect);
+        assert_eq!(runs, vec![vec![(0.0, 7.0), (3.0, 10.0)]]);
+    }
+
+    #[test]
+    fn zoom_keeps_the_anchor_fixed() {
+        let v = AxisView::UNIT.zoom_at(0.25, 0.5, 0.0, X_LIMITS);
+        assert_eq!(
+            v,
+            AxisView {
+                lo: 0.125,
+                hi: 0.625
+            }
+        );
+        // The capture point under the anchor is the same before and after.
+        assert_eq!(AxisView::UNIT.to_data(0.25), v.to_data(0.25));
+        let v2 = v.zoom_at(0.5, 0.5, 0.0, X_LIMITS);
+        assert!((v.to_data(0.5) - v2.to_data(0.5)).abs() < 1e-12);
+    }
+
+    #[test]
+    fn zoom_out_stops_at_full_view_and_stays_inside() {
+        let v = AxisView { lo: 0.8, hi: 0.9 };
+        assert_eq!(v.zoom_at(1.0, 100.0, 0.0, X_LIMITS), AxisView::UNIT);
+        assert!(AxisView::UNIT.zoom_at(0.0, 1.5, 0.0, X_LIMITS).is_unit());
+        // Zooming out near the end shifts the window back inside the capture.
+        let w = v.zoom_at(1.0, 3.0, 0.0, X_LIMITS);
+        assert!(w.hi <= 1.0 && w.lo >= 0.0);
+        assert!((w.span() - 0.3).abs() < 1e-12);
+    }
+
+    #[test]
+    fn zoom_in_is_limited_by_min_span() {
+        let v = AxisView::UNIT.zoom_at(0.5, 1e-9, 0.01, X_LIMITS);
+        assert!((v.span() - 0.01).abs() < 1e-12);
+    }
+
+    /// Voltage-axis limits wider than the screen (as for the ADC range).
+    const WIDE: AxisLimits = AxisLimits {
+        lo: -0.125,
+        hi: 1.15,
+    };
+
+    #[test]
+    fn axis_can_zoom_out_past_the_unit_view_up_to_its_limits() {
+        let out = AxisView::UNIT.zoom_at(0.5, 1.2, 0.0, WIDE);
+        assert!((out.span() - 1.2).abs() < 1e-12);
+        assert!(out.lo >= WIDE.lo && out.hi <= WIDE.hi);
+        let max = out.zoom_at(0.5, 100.0, 0.0, WIDE);
+        assert_eq!(
+            max,
+            AxisView {
+                lo: WIDE.lo,
+                hi: WIDE.hi
+            }
+        );
+    }
+
+    #[test]
+    fn zooming_through_the_unit_span_stops_at_the_unit_view() {
+        // Zoomed in off-centre, then zoomed out past 1: lands exactly on UNIT.
+        let zoomed = AxisView { lo: 0.6, hi: 0.9 };
+        assert_eq!(zoomed.zoom_at(0.9, 4.0, 0.0, WIDE), AxisView::UNIT);
+        // Zoomed out, then back in past 1: also UNIT.
+        let wide = AxisView { lo: -0.1, hi: 1.1 };
+        assert_eq!(wide.zoom_at(0.2, 0.8, 0.0, WIDE), AxisView::UNIT);
+        // The next step continues normally.
+        assert!(AxisView::UNIT.zoom_at(0.5, 0.8, 0.0, WIDE).span() < 1.0);
+    }
+
+    #[test]
+    fn pan_stops_at_capture_ends() {
+        let v = AxisView { lo: 0.4, hi: 0.6 };
+        assert_eq!(v.pan(0.1, X_LIMITS), AxisView { lo: 0.5, hi: 0.7 });
+        let end = v.pan(5.0, X_LIMITS);
+        assert!((end.hi - 1.0).abs() < 1e-12 && (end.span() - 0.2).abs() < 1e-12);
+        assert_eq!(v.pan(-5.0, X_LIMITS).lo, 0.0);
+        assert_eq!(AxisView::UNIT.pan(0.3, X_LIMITS), AxisView::UNIT);
+    }
+
+    #[test]
+    fn screen_and_data_fractions_round_trip() {
+        let v = AxisView { lo: 0.2, hi: 0.4 };
+        assert!((v.to_screen(0.3) - 0.5).abs() < 1e-12);
+        assert!((v.to_data(0.5) - 0.3).abs() < 1e-12);
+        assert!(v.to_screen(0.1) < 0.0);
+    }
+
     #[test]
     fn polyline_inside_band_is_one_run() {
         let pts = [(0.0, 10.0), (1.0, 20.0), (2.0, 15.0)];
-        assert_eq!(clip_polyline_y(&pts, 0.0, 100.0), vec![pts.to_vec()]);
+        assert_eq!(clip_polyline(&pts, band(0.0, 100.0)), vec![pts.to_vec()]);
     }
 
     #[test]
@@ -183,7 +444,7 @@ mod tests {
             (3.0, 90.0),
             (4.0, 50.0),
         ];
-        let runs = clip_polyline_y(&pts, 0.0, 100.0);
+        let runs = clip_polyline(&pts, band(0.0, 100.0));
         assert_eq!(runs.len(), 2);
         assert_eq!(runs[0], vec![(0.0, 50.0), (1.0, 90.0), (1.25, 100.0)]);
         assert_eq!(runs[1], vec![(2.75, 100.0), (3.0, 90.0), (4.0, 50.0)]);
@@ -193,21 +454,21 @@ mod tests {
     fn polyline_entirely_outside_band_is_dropped() {
         let pts = [(0.0, -10.0), (1.0, -20.0), (2.0, 300.0)];
         // The last segment crosses the whole band, so only that piece remains.
-        let runs = clip_polyline_y(&pts, 0.0, 100.0);
+        let runs = clip_polyline(&pts, band(0.0, 100.0));
         assert_eq!(runs.len(), 1);
         assert_eq!(runs[0].len(), 2);
         assert!(runs[0].iter().all(|p| (0.0..=100.0).contains(&p.1)));
-        assert!(clip_polyline_y(&[(0.0, -5.0), (1.0, -6.0)], 0.0, 100.0).is_empty());
+        assert!(clip_polyline(&[(0.0, -5.0), (1.0, -6.0)], band(0.0, 100.0)).is_empty());
     }
 
     #[test]
     fn single_point_and_empty_input() {
         assert_eq!(
-            clip_polyline_y(&[(3.0, 4.0)], 0.0, 10.0),
+            clip_polyline(&[(3.0, 4.0)], band(0.0, 10.0)),
             vec![vec![(3.0, 4.0)]]
         );
-        assert!(clip_polyline_y(&[(3.0, 40.0)], 0.0, 10.0).is_empty());
-        assert!(clip_polyline_y(&[], 0.0, 10.0).is_empty());
+        assert!(clip_polyline(&[(3.0, 40.0)], band(0.0, 10.0)).is_empty());
+        assert!(clip_polyline(&[], band(0.0, 10.0)).is_empty());
     }
 
     #[test]

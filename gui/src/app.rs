@@ -3,7 +3,7 @@
 use std::path::PathBuf;
 
 use chrono::{DateTime, Local};
-use dso_parser::{ADC_VALUE_MID, Capture, DEFAULT_BUFFER_DEPTH};
+use dso_parser::{ADC_VALUE_MID, Capture};
 #[cfg(test)]
 use dso_parser::ADC_VALUE_MAX;
 use iced::widget::{
@@ -18,8 +18,22 @@ use iced::{
     Element, Length, Subscription, Task, Theme,
 };
 
-use crate::canvas::{CursorDrag, Knob, Scope, Thumbnail};
+use crate::canvas::{CursorDrag, Knob, Scope, Thumbnail, ViewReset};
+use crate::plot::View;
 use crate::scale::{CaptureScale, ScaleSource};
+
+/// Identity of a capture for remembering its zoom: the address of its
+/// sample buffer (stable while the capture exists, even when the capture
+/// list is reordered) plus its timestamp, so a new capture that happens to
+/// reuse a freed buffer is still told apart.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct CaptureId(usize, DateTime<Local>);
+
+impl CaptureId {
+    fn of(entry: &CaptureEntry) -> Self {
+        Self(entry.capture.ch1.as_ptr() as usize, entry.timestamp)
+    }
+}
 use crate::export_image::export_png;
 use crate::i18n::t;
 use crate::range_slider;
@@ -70,6 +84,10 @@ pub enum Message {
     VOffsetChangedCh2(String),
     // Measurement-cursor drag on the graph (one line, or X+Y near their crossing)
     MeasCursorDragged(CursorDrag),
+    // Zoom/pan of the graph (mouse wheel, right-drag)
+    ViewChanged(View),
+    // Double-click on the graph: reset the zoom
+    ViewReset(ViewReset),
     // Misc
     OpenInstructions,
     CloseInstructions,
@@ -189,6 +207,10 @@ pub struct App {
     was_listening_before_flash: bool,
     /// Target capture index for context menu export operations.
     context_export_idx: Option<usize>,
+    /// Zoom/pan of both axes and the capture it belongs to. Any other
+    /// capture is shown unzoomed, so selecting, receiving or deleting
+    /// captures needs no explicit reset.
+    view: Option<(CaptureId, View)>,
     /// Last deleted capture, available for undo (index it was at, entry).
     deleted_capture: Option<(usize, CaptureEntry)>,
     /// Timestamp of the last deletion, for 30-second undo expiry.
@@ -251,6 +273,7 @@ impl App {
                 firmware_confirming: false,
                 was_listening_before_flash: false,
                 context_export_idx: None,
+                view: None,
                 deleted_capture: None,
                 deleted_at: None,
                 ctrl_pressed: false,
@@ -722,6 +745,24 @@ impl App {
                         self.settings.v_offset_ch2 = v;
                         self.settings.save();
                     }
+                }
+                Task::none()
+            }
+            Message::ViewChanged(view) => {
+                self.view = self
+                    .current_entry()
+                    .map(|e| (CaptureId::of(e), view));
+                Task::none()
+            }
+            Message::ViewReset(reset) => {
+                self.view = None;
+                // Undo the cursor move made by the first click of the
+                // double-click (ranges are only present for enabled cursors).
+                if let Some(range) = reset.cursor_x {
+                    self.settings.cursor_x_range = range;
+                }
+                if let Some(range) = reset.cursor_y {
+                    self.settings.cursor_y_range = range;
                 }
                 Task::none()
             }
@@ -1429,6 +1470,15 @@ impl App {
     }
 
     /// Scale of the capture being shown.
+    /// Zoom/pan of the capture being shown; unzoomed unless the user
+    /// zoomed this very capture.
+    pub(crate) fn current_view(&self) -> View {
+        match (&self.view, self.current_entry()) {
+            (Some((id, view)), Some(e)) if *id == CaptureId::of(e) => *view,
+            _ => View::UNIT,
+        }
+    }
+
     pub(crate) fn current_scale(&self) -> CaptureScale {
         self.scale_of(self.current)
     }
@@ -1467,7 +1517,6 @@ impl App {
             cap.is_some(),
             cap.map(|c| c.ch1.len()).unwrap_or(0)
         );
-        let n_samples = cap.map(|c| c.ch1.len()).unwrap_or(DEFAULT_BUFFER_DEPTH);
         let has_ch2_data = cap.and_then(|c| c.ch2.as_ref()).is_some();
         let scale = self.current_scale();
         let scope = Scope {
@@ -1476,7 +1525,6 @@ impl App {
             show_ch2: self.settings.show_ch2,
             view_mode: self.settings.view_mode,
             show_scales: self.settings.show_scales,
-            n_samples,
             has_ch1: self.settings.show_ch1,
             has_ch2: self.settings.show_ch2 && has_ch2_data,
             meas_cursor_x: if self.settings.measurement_cursor_x_enabled {
@@ -1515,6 +1563,9 @@ impl App {
                 .map(|s| s.active_channel)
                 .unwrap_or(0),
             on_cursor_drag: Some(Message::MeasCursorDragged),
+            view: self.current_view(),
+            on_view_change: Some(Message::ViewChanged),
+            on_view_reset: Some(Message::ViewReset),
         };
         canvas(scope)
             .width(Length::Fill)
@@ -2580,6 +2631,52 @@ mod tests {
         assert_eq!((app.settings.v_per_div_ch1, app.settings.t_per_div_ms), manual_before);
         // Exports of a capture that is not shown use that capture's scale.
         assert_eq!(app.scale_of(0).source, ScaleSource::Metadata);
+    }
+
+    #[test]
+    fn zoom_belongs_to_the_capture_it_was_made_on() {
+        let (mut app, _) = App::new();
+        app.dump = Some(LoadedDump {
+            path: PathBuf::from("test.bin"),
+            captures: vec![
+                test_entry(Capture { ch1: vec![1; 100], ch2: None }),
+                test_entry(Capture { ch1: vec![2; 100], ch2: None }),
+            ],
+        });
+        let zoomed = View {
+            x: crate::plot::AxisView { lo: 0.2, hi: 0.4 },
+            y: crate::plot::AxisView { lo: -0.1, hi: 1.1 },
+        };
+        let _ = app.update(Message::ViewChanged(zoomed));
+        assert_eq!(app.current_view(), zoomed);
+
+        // Another capture is shown in full; coming back restores the zoom.
+        let _ = app.update(Message::SelectCapture(1));
+        assert_eq!(app.current_view(), View::UNIT);
+        let _ = app.update(Message::SelectCapture(0));
+        assert_eq!(app.current_view(), zoomed);
+    }
+
+    #[test]
+    fn double_click_reset_unzooms_and_restores_cursors() {
+        let (mut app, _) = App::new();
+        app.dump = Some(LoadedDump {
+            path: PathBuf::from("test.bin"),
+            captures: vec![test_entry(Capture { ch1: vec![1; 100], ch2: None })],
+        });
+        let mut zoomed = View::UNIT;
+        zoomed.x = crate::plot::AxisView { lo: 0.2, hi: 0.4 };
+        let _ = app.update(Message::ViewChanged(zoomed));
+        app.settings.cursor_x_range = (0.3, 0.5); // moved by the first click
+        app.settings.cursor_y_range = (0.1, 0.9);
+
+        let _ = app.update(Message::ViewReset(ViewReset {
+            cursor_x: Some((0.3, 0.7)),
+            cursor_y: None,
+        }));
+        assert_eq!(app.current_view(), View::UNIT);
+        assert_eq!(app.settings.cursor_x_range, (0.3, 0.7));
+        assert_eq!(app.settings.cursor_y_range, (0.1, 0.9));
     }
 
     #[test]

@@ -75,6 +75,31 @@ yellow CH1, cyan CH2. Renders:
   shape over a line or crossing. A drag keeps following the pointer when it
   leaves the canvas (the line stops at the plot edge) and ends on release
   anywhere.
+* **Zoom** on both axes (`plot::View` = one `plot::AxisView` per axis, the
+  visible `lo..hi` in unit coordinates: fraction of the capture for time,
+  fraction of the device screen height for voltage). Wheel zooms time around
+  the pointer (1.25× per notch; trackpad pixel scrolling doubles every
+  200 px); Option/Alt + wheel, or wheel over the voltage labels, zooms
+  voltage; horizontal scrolling or Shift + wheel pans time; right/middle-drag
+  pans both axes; a double-click (iced `mouse::Click`, 300 ms / 6 px)
+  resets both axes. Because a single click places the nearest cursor line,
+  the canvas remembers the cursor ranges from before the first click and
+  `Message::ViewReset` restores them, so a double-click only unzooms.
+  Limits (`AxisLimits`): time stays inside the capture and
+  stops at 10 visible samples; voltage may zoom out past the device screen to
+  the full ADC range (0..=255, `Y_LIMITS`) and stops at 8 ADC levels. Zooming
+  through the unzoomed span stops exactly at `AxisView::UNIT` (a detent). When
+  the voltage view extends past the screen, its top and bottom edges are drawn
+  as orange lines. The canvas publishes `Message::ViewChanged`; the app
+  stores the view together with the identity of the capture it was made on
+  (sample-buffer address and timestamp), so any other capture is shown
+  unzoomed without explicit resets. Only the visible samples are processed
+  when drawing. Measurement and device cursors stay in unit coordinates: they
+  are mapped through the view for drawing and hit-testing, and lines outside
+  the view are neither drawn nor grabbable. Time and voltage labels follow
+  the visible window, with enough decimals to tell divisions apart; an
+  `X ×N  Y ×M` indicator shows the zoomed axes. PNG export is not affected
+  by the zoom.
 * Green thin lines for **device cursors** (data-supplied, read-only) with
   numeric labels (sample numbers for X, voltage for Y).
 * Optional **axis scales** toggled via "Show scales" setting. Scale values

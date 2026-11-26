@@ -78,6 +78,37 @@ metadata (debug dumps) use the manual scale from the Measurement panel. See
 * **CH1** (yellow), **CH2** (cyan) — toggle visibility in the controls panel.
 * **View mode** dropdown: Line, Dot, or Smooth (moving-average filter).
 
+### Zoom
+
+Zoom works on both axes, with the pointer over the graph:
+
+| Action | Effect |
+|--------|--------|
+| Mouse wheel up / down (or two-finger scroll on a trackpad) | Zoom **time** in / out around the pointer: the point under the pointer stays in place |
+| **Option/Alt** + wheel, or wheel over the **voltage labels** on the left | Zoom **voltage** in / out around the pointer |
+| Horizontal scroll (trackpad swipe, tilt wheel) or **Shift** + wheel | Pan time left / right |
+| **Right-drag** (or middle-drag) | Pan both axes: the signal follows the pointer |
+| **Double-click** | Reset the zoom on both axes (cursors are left where they were) |
+| Zoom out on an axis | Stops once at the normal view (whole capture, device screen); keep going to zoom out further |
+
+The zoom factor of each zoomed axis is shown in the top-right corner of the
+graph (for example `X ×4.0  Y ×2.0`), and the time and voltage labels show the
+zoomed window. Time zoom stops when about 10 samples fill the width, so it is
+most useful on debug dumps (60 000 samples); a screenshot has only 300 points.
+Voltage zoom stops at 8 ADC steps across the height.
+
+The voltage axis can be zoomed out **past the device screen**, up to the full
+ADC range (0–255), to show the parts of the signal the oscilloscope clipped
+off its own screen. The device screen's top and bottom edges are then marked
+with orange lines.
+
+Each capture keeps its own zoom: selecting another capture shows it unzoomed,
+and coming back restores the zoom. Measurement cursors stay on the signal
+while zooming; a cursor line outside the zoomed window is not drawn and cannot
+be grabbed until it is in view again. Δt, ΔV and the slider positions always
+refer to the whole capture and the device screen. PNG export always shows the
+whole capture, unzoomed.
+
 ## Scale configuration
 
 At the top of the **Measurement** panel you can set the real-world scale.
